@@ -32,6 +32,15 @@ gRParse's default path stays CV. Clients opt into this collector
 explicitly (`collectors += VLM`) or by `pipeline = VLM`. Running both
 is legal: sources do not overwrite.
 
+## Live results (vs Docling)
+
+Docling's VLM pipeline waits until every page has been through the
+model, then returns one document. We emit a **`PageDocument` as soon
+as that page's VLM call returns**, tagged with `page_no`. A UI can
+paint page 1 (or page 4, if it finished first) without waiting for
+the rest. Pages may complete out of order; the coordinator and the
+UI key on `page_no`. `ConvertComplete` is a trailer, not the payload.
+
 ## What this process owns
 
 - Turning pages into model inputs (rasterize if given a PDF, or

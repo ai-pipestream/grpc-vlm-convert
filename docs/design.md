@@ -8,7 +8,10 @@
   plus `*_raw` for Unlimited-OCR / Dolphin / Chandra / dots.ocr / …).
 - Page-streamed `Document` events with real provenance boxes when the
   response format carries them (DocTags). Markdown/HTML responses get
-  page-level provenance only — do not invent word boxes.
+  page-level provenance only — do not invent word boxes. Emit a page
+  when that page is ready, not after the last page: Docling's VLM
+  convert is batch; live UI is the product path here. Out-of-order
+  pages are legal if `page_no` is set.
 - Typed mapping. No `json_format.MessageToDict` bridge. DocTags →
   proto items in code.
 
@@ -46,15 +49,16 @@ Options:
 - `endpoint` override
 - `concurrency` (pages in flight against the VLM)
 
-Events:
+Events (completion order, not page order):
 
 1. `PageStarted` — page_no
 2. `PageDocument` — a `Document` fragment for that page (items,
    pictures, tables) **or** `PageRaw` (model text) if mapping failed
 3. `ConvertComplete` — pages ok / failed
 
-gRParse merges page fragments with the same additive rules as other
-collectors.
+A UI paints `PageDocument` immediately. gRParse merges fragments with
+the same additive rules as other collectors; it must not hold page 4
+until page 3 arrives.
 
 ## 4. Response mapping
 
