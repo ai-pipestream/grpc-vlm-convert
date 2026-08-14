@@ -6,6 +6,8 @@
 
 #include "mapper.h"
 
+#include <vector>
+
 namespace vlm::mapping {
 
 // The full-page box — the only provenance formats without real locations
@@ -143,69 +145,118 @@ inline docv1::TableItem* add_table(docv1::Document* doc, const PageContext& page
 
 namespace internal {
 
-inline void stamp_text_ref(docv1::TextItemBase* base, const std::string& self_ref) {
+inline void stamp_text_ref(docv1::TextItemBase* base, const std::string& self_ref,
+                           const std::string& parent_ref) {
     base->set_self_ref(self_ref);
-    base->mutable_parent()->set_ref("#/body");
+    base->mutable_parent()->set_ref(parent_ref);
+}
+
+inline void stamp_text_item(docv1::BaseTextItem& item, const std::string& self_ref,
+                            const std::string& parent_ref) {
+    switch (item.item_case()) {
+        case docv1::BaseTextItem::kTitle:
+            stamp_text_ref(item.mutable_title()->mutable_base(), self_ref, parent_ref);
+            break;
+        case docv1::BaseTextItem::kSectionHeader:
+            stamp_text_ref(item.mutable_section_header()->mutable_base(), self_ref, parent_ref);
+            break;
+        case docv1::BaseTextItem::kListItem:
+            stamp_text_ref(item.mutable_list_item()->mutable_base(), self_ref, parent_ref);
+            break;
+        case docv1::BaseTextItem::kFormula:
+            stamp_text_ref(item.mutable_formula()->mutable_base(), self_ref, parent_ref);
+            break;
+        case docv1::BaseTextItem::kText:
+            stamp_text_ref(item.mutable_text()->mutable_base(), self_ref, parent_ref);
+            break;
+        case docv1::BaseTextItem::kFieldHeading:
+            stamp_text_ref(item.mutable_field_heading()->mutable_base(), self_ref, parent_ref);
+            break;
+        case docv1::BaseTextItem::kFieldValue:
+            stamp_text_ref(item.mutable_field_value()->mutable_base(), self_ref, parent_ref);
+            break;
+        case docv1::BaseTextItem::kCode:
+            item.mutable_code()->set_self_ref(self_ref);
+            item.mutable_code()->mutable_parent()->set_ref(parent_ref);
+            break;
+        default:
+            break;
+    }
+}
+
+// The common case: items whose parent is the body group.
+inline void stamp_text_item(docv1::BaseTextItem& item, const std::string& self_ref) {
+    stamp_text_item(item, self_ref, "#/body");
 }
 
 }  // namespace internal
 
+// One body child in emission order: which item list and the index in it.
+// Mappers that know their source order (DocTags) pass it through; the
+// others default to texts → pictures → tables. GROUP entries are the
+// DocTags list/inline groups; their children are parented to the group,
+// not the body, at emission time.
+struct BodyChild {
+    enum Kind { TEXT = 0, PICTURE = 1, TABLE = 2, KEY_VALUE = 3, GROUP = 4 };
+    Kind kind;
+    int index;
+};
+
+inline std::string body_child_ref(BodyChild::Kind kind, int index) {
+    const char* list = nullptr;
+    switch (kind) {
+        case BodyChild::TEXT:
+            list = "texts";
+            break;
+        case BodyChild::PICTURE:
+            list = "pictures";
+            break;
+        case BodyChild::TABLE:
+            list = "tables";
+            break;
+        case BodyChild::KEY_VALUE:
+            list = "key_value_items";
+            break;
+        case BodyChild::GROUP:
+            list = "groups";
+            break;
+    }
+    return "#/" + std::string(list) + "/" + std::to_string(index);
+}
+
 // Sets the fragment skeleton after items are added: "#/body" group with a
-// child ref per item in document order (texts, then pictures, then
-// tables — the docling fragment order), self refs and parents, and the
+// child ref per item in the given order, self refs and parents, and the
 // pages map entry with the raster size.
-inline void finalize_document(docv1::Document* doc, const PageContext& page) {
+inline void finalize_document(docv1::Document* doc, const PageContext& page,
+                              const std::vector<BodyChild>& order) {
     doc->set_name("page-" + std::to_string(page.page_no));
     docv1::GroupItem* body = doc->mutable_body();
     body->set_self_ref("#/body");
     body->set_content_layer(docv1::CONTENT_LAYER_BODY);
 
-    int index = 0;
-    for (docv1::BaseTextItem& item : *doc->mutable_texts()) {
-        const std::string self_ref = "#/texts/" + std::to_string(index++);
-        switch (item.item_case()) {
-            case docv1::BaseTextItem::kTitle:
-                internal::stamp_text_ref(item.mutable_title()->mutable_base(), self_ref);
-                break;
-            case docv1::BaseTextItem::kSectionHeader:
-                internal::stamp_text_ref(item.mutable_section_header()->mutable_base(), self_ref);
-                break;
-            case docv1::BaseTextItem::kListItem:
-                internal::stamp_text_ref(item.mutable_list_item()->mutable_base(), self_ref);
-                break;
-            case docv1::BaseTextItem::kFormula:
-                internal::stamp_text_ref(item.mutable_formula()->mutable_base(), self_ref);
-                break;
-            case docv1::BaseTextItem::kText:
-                internal::stamp_text_ref(item.mutable_text()->mutable_base(), self_ref);
-                break;
-            case docv1::BaseTextItem::kFieldHeading:
-                internal::stamp_text_ref(item.mutable_field_heading()->mutable_base(), self_ref);
-                break;
-            case docv1::BaseTextItem::kFieldValue:
-                internal::stamp_text_ref(item.mutable_field_value()->mutable_base(), self_ref);
-                break;
-            case docv1::BaseTextItem::kCode:
-                item.mutable_code()->set_self_ref(self_ref);
-                item.mutable_code()->mutable_parent()->set_ref("#/body");
-                break;
-            default:
-                break;
+    for (const BodyChild& child : order) {
+        const std::string self_ref = body_child_ref(child.kind, child.index);
+        if (child.kind == BodyChild::TEXT) {
+            internal::stamp_text_item(*doc->mutable_texts(child.index), self_ref);
+        } else if (child.kind == BodyChild::PICTURE) {
+            docv1::PictureItem* picture = doc->mutable_pictures(child.index);
+            picture->set_self_ref(self_ref);
+            picture->mutable_parent()->set_ref("#/body");
+        } else if (child.kind == BodyChild::TABLE) {
+            docv1::TableItem* table = doc->mutable_tables(child.index);
+            table->set_self_ref(self_ref);
+            table->mutable_parent()->set_ref("#/body");
+        } else if (child.kind == BodyChild::KEY_VALUE) {
+            docv1::KeyValueItem* kv = doc->mutable_key_value_items(child.index);
+            kv->set_self_ref(self_ref);
+            kv->mutable_parent()->set_ref("#/body");
+        } else {
+            // Groups: self ref and body parent here; their children were
+            // parented to the group when it was emitted.
+            docv1::GroupItem* group = doc->mutable_groups(child.index);
+            group->set_self_ref(self_ref);
+            group->mutable_parent()->set_ref("#/body");
         }
-        body->add_children()->set_ref(self_ref);
-    }
-    index = 0;
-    for (docv1::PictureItem& picture : *doc->mutable_pictures()) {
-        const std::string self_ref = "#/pictures/" + std::to_string(index++);
-        picture.set_self_ref(self_ref);
-        picture.mutable_parent()->set_ref("#/body");
-        body->add_children()->set_ref(self_ref);
-    }
-    index = 0;
-    for (docv1::TableItem& table : *doc->mutable_tables()) {
-        const std::string self_ref = "#/tables/" + std::to_string(index++);
-        table.set_self_ref(self_ref);
-        table.mutable_parent()->set_ref("#/body");
         body->add_children()->set_ref(self_ref);
     }
 
@@ -213,6 +264,22 @@ inline void finalize_document(docv1::Document* doc, const PageContext& page) {
     page_item.set_page_no(static_cast<int32_t>(page.page_no));
     page_item.mutable_size()->set_width(page.width);
     page_item.mutable_size()->set_height(page.height);
+}
+
+// The legacy fragment order — texts, then pictures, then tables — for
+// mappers whose source has no interleaved reading order to preserve.
+inline void finalize_document(docv1::Document* doc, const PageContext& page) {
+    std::vector<BodyChild> order;
+    for (int i = 0; i < doc->texts_size(); i++) {
+        order.push_back({BodyChild::TEXT, i});
+    }
+    for (int i = 0; i < doc->pictures_size(); i++) {
+        order.push_back({BodyChild::PICTURE, i});
+    }
+    for (int i = 0; i < doc->tables_size(); i++) {
+        order.push_back({BodyChild::TABLE, i});
+    }
+    finalize_document(doc, page, order);
 }
 
 inline std::string trim(const std::string& text) {

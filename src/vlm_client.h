@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 namespace vlm {
 
@@ -13,6 +14,10 @@ struct VlmCall {
     std::string model;
     // Prompt text accompanying the page image.
     std::string prompt;
+    // OpenAI "stop" parameter; empty means the parameter is omitted.
+    std::vector<std::string> stop;
+    // OpenAI "max_tokens" parameter (per-preset in Docling's specs).
+    int max_tokens = 4096;
     // PNG-encoded page raster.
     std::string png;
     // Whole-call timeout in seconds.
@@ -36,8 +41,17 @@ struct VlmResult {
 };
 
 // Calls {endpoint}/v1/chat/completions with the page image inline as a
-// data URL. Blocking; meant for the worker pool.
+// data URL. Blocking; meant for the worker pool. Retries like docling's
+// api_image_request: up to 5 retries with exponential backoff (100ms
+// base) on HTTP 429/500/502/503/504 and on connect-level transport
+// failures (vLLM still starting); other statuses, and 200s that do not
+// parse, fail without a retry. The configured timeout applies per
+// attempt, so a worst-case call takes (1 + retries) × timeout.
 VlmResult generate(const VlmCall& call);
+
+// Test hook: overrides the retry backoff base delay in milliseconds.
+// Tests set this to 0 so persistent-failure cases do not sleep ~3s.
+void set_retry_backoff_base_ms(long ms);
 
 // Validates an endpoint string enough to fail fast at RPC start
 // (scheme://host[:port][/path], http only). Empty detail when valid.

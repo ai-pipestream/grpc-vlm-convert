@@ -104,8 +104,10 @@ grpc::Status VlmConvertServiceImpl::ConvertPages(
     }
 
     std::string model, prompt;
+    std::vector<std::string> stop;
+    int max_tokens = 4096;
     vlmv1::ResponseFormat format;
-    if (!resolve_request(options, &model, &prompt, &format)) {
+    if (!resolve_request(options, &model, &prompt, &format, &stop, &max_tokens)) {
         return client_error(grpc::StatusCode::INVALID_ARGUMENT,
                             "preset resolves to no model name (set preset or preset_raw)");
     }
@@ -145,6 +147,7 @@ grpc::Status VlmConvertServiceImpl::ConvertPages(
                 page.page_no = job.image.page_no();
                 page.width = job.image.width();
                 page.height = job.image.height();
+                page.png = job.image.png();
                 page.source.set_collector("vlm-convert");
                 page.source.set_model(job.model);
                 if (result.has_confidence) {
@@ -236,6 +239,8 @@ grpc::Status VlmConvertServiceImpl::ConvertPages(
         job.call.endpoint = endpoint;
         job.call.model = model;
         job.call.prompt = prompt;
+        job.call.stop = stop;
+        job.call.max_tokens = max_tokens;
         job.call.png = image.png();
         job.call.timeout_seconds = static_cast<long>(config_.vlm_timeout_seconds);
         job.format = format;

@@ -1,6 +1,9 @@
 #include "vlm_client.h"
 
+#include <atomic>
+#include <chrono>
 #include <cmath>
+#include <thread>
 
 #include <httplib.h>
 #include <nlohmann/json.hpp>
@@ -8,6 +11,23 @@
 namespace vlm {
 
 namespace {
+
+// Docling's api_image_request retry policy (urllib3 Retry): 5 retries,
+// exponential backoff with a 0.1s factor, on these statuses.
+constexpr int kMaxRetries = 5;
+std::atomic<long> g_backoff_base_ms{100};
+
+bool retryable_status(int status) {
+    return status == 429 || status == 500 || status == 502 || status == 503 ||
+           status == 504;
+}
+
+// Connect-level failures retry (connection refused while vLLM starts);
+// mid-request read/write/SSL failures do not — docling's Retry has
+// connect=5 but read=0.
+bool retryable_transport(httplib::Error error) {
+    return error == httplib::Error::Connection || error == httplib::Error::ConnectionTimeout;
+}
 
 std::string base64_encode(const std::string& bytes) {
     static const char kAlphabet[] =
@@ -51,6 +71,8 @@ bool split_endpoint(const std::string& endpoint, std::string* origin, std::strin
 
 }  // namespace
 
+void set_retry_backoff_base_ms(long ms) { g_backoff_base_ms.store(ms); }
+
 std::string endpoint_error(const std::string& endpoint) {
     std::string origin, path;
     if (!split_endpoint(endpoint, &origin, &path)) {
@@ -75,21 +97,46 @@ VlmResult generate(const VlmCall& call) {
             {{{"type", "text"}, {"text", call.prompt}},
              {{"type", "image_url"},
               {"image_url", {{"url", "data:image/png;base64," + base64_encode(call.png)}}}}}}}}},
-        {"max_tokens", 4096},
+        {"max_tokens", call.max_tokens},
         {"logprobs", true},
     };
+    if (!call.stop.empty()) {
+        body["stop"] = call.stop;
+    }
 
-    httplib::Client client(origin);
-    client.set_connection_timeout(call.timeout_seconds, 0);
-    client.set_read_timeout(call.timeout_seconds, 0);
-    client.set_write_timeout(call.timeout_seconds, 0);
-    auto response = client.Post(path + "/v1/chat/completions", body.dump(), "application/json");
+    const std::string payload = body.dump();
+    httplib::Result response;
+    int retries = 0;
+    for (;;) {
+        // A fresh client per attempt: after a connect-level failure the
+        // previous one's socket state is useless anyway.
+        httplib::Client client(origin);
+        client.set_connection_timeout(call.timeout_seconds, 0);
+        client.set_read_timeout(call.timeout_seconds, 0);
+        client.set_write_timeout(call.timeout_seconds, 0);
+        response = client.Post(path + "/v1/chat/completions", payload, "application/json");
+        const bool retryable = response ? retryable_status(response->status)
+                                        : retryable_transport(response.error());
+        if (!retryable || retries == kMaxRetries) {
+            break;
+        }
+        retries++;
+        // Exponential backoff like urllib3: base * 2^(retries-1) —
+        // 0.1s, 0.2s, 0.4s, ... at the default base.
+        const long delay_ms = g_backoff_base_ms.load() << (retries - 1);
+        if (delay_ms > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+        }
+    }
     if (!response) {
         result.error = "endpoint unreachable: " + origin;
         return result;
     }
     if (response->status != 200) {
         result.error = "endpoint returned HTTP " + std::to_string(response->status);
+        if (retries > 0) {
+            result.error += " after " + std::to_string(retries + 1) + " attempts";
+        }
         return result;
     }
 
@@ -98,8 +145,12 @@ VlmResult generate(const VlmCall& call) {
         result.error = "endpoint returned non-JSON body";
         return result;
     }
+    // Key access goes through contains(): const operator[] on a missing
+    // key is undefined behavior, and endpoints omit fields freely.
     const auto& choices = parsed["choices"];
-    if (!choices.is_array() || choices.empty() ||
+    if (!choices.is_array() || choices.empty() || !choices[0].is_object() ||
+        !choices[0].contains("message") || !choices[0]["message"].is_object() ||
+        !choices[0]["message"].contains("content") ||
         !choices[0]["message"]["content"].is_string()) {
         result.error = "chat completion has no message content";
         return result;
@@ -109,19 +160,23 @@ VlmResult generate(const VlmCall& call) {
     // Logprobs are optional (Docling's OpenAI VLM logprobs knob). Mean
     // token probability becomes the CollectorSource confidence; absent
     // means skipped silently.
-    const auto& logprobs = choices[0]["logprobs"]["content"];
-    if (logprobs.is_array() && !logprobs.empty()) {
-        double sum = 0.0;
-        size_t count = 0;
-        for (const auto& token : logprobs) {
-            if (token["logprob"].is_number()) {
-                sum += token["logprob"].get<double>();
-                count++;
+    const auto& first = choices[0];
+    if (first.contains("logprobs") && first["logprobs"].is_object() &&
+        first["logprobs"].contains("content")) {
+        const auto& logprobs = first["logprobs"]["content"];
+        if (logprobs.is_array() && !logprobs.empty()) {
+            double sum = 0.0;
+            size_t count = 0;
+            for (const auto& token : logprobs) {
+                if (token["logprob"].is_number()) {
+                    sum += token["logprob"].get<double>();
+                    count++;
+                }
             }
-        }
-        if (count > 0) {
-            result.has_confidence = true;
-            result.confidence = std::exp(sum / static_cast<double>(count));
+            if (count > 0) {
+                result.has_confidence = true;
+                result.confidence = std::exp(sum / static_cast<double>(count));
+            }
         }
     }
     result.ok = true;

@@ -17,6 +17,10 @@ struct PageContext {
     // Raster dimensions; DocTags locations scale into these pixels.
     uint32_t width = 0;
     uint32_t height = 0;
+    // The page raster itself, when the caller sent one: the DocTags mapper
+    // crops picture regions out of it for ImageRef attachments. Empty for
+    // mappers/tests that have no image.
+    std::string png;
     // Collector attribution stamped on every item ("vlm-convert", the
     // model name, optional confidence from endpoint logprobs).
     docv1::CollectorSource source;

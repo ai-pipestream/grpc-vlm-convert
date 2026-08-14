@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -18,6 +19,7 @@
 #include "config.h"
 #include "fixture.h"
 #include "service/vlm_convert_service.h"
+#include "vlm_client.h"
 
 namespace vlmv1 = ai::pipestream::vlm::v1;
 
@@ -60,12 +62,26 @@ struct FakeVlm {
     std::thread thread;
     int port = 0;
     std::atomic<long> calls{0};
+    // The most recent request body, for wire-level assertions (stop
+    // strings, max_tokens). Guarded: the handler runs on the server
+    // thread.
+    std::mutex mutex;
+    nlohmann::json last_body;
+
+    nlohmann::json last_request() {
+        std::lock_guard<std::mutex> lock(mutex);
+        return last_body;
+    }
 
     void start() {
         server.Post("/v1/chat/completions", [this](const httplib::Request& request,
                                                    httplib::Response& response) {
             calls++;
             nlohmann::json body = nlohmann::json::parse(request.body, nullptr, false);
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                last_body = body;
+            }
             std::string url = body["messages"][0]["content"][1]["image_url"]["url"];
             const std::string prefix = "data:image/png;base64,";
             require(url.compare(0, prefix.size(), prefix) == 0, "image arrives as a data URL");
@@ -292,8 +308,39 @@ void verify_markdown_and_raw_fallback(const std::shared_ptr<grpc::Channel>& chan
     require(raw.complete.pages_failed() == 1, "trailer counts the failed page");
 }
 
-void verify_abort_on_error(const std::shared_ptr<grpc::Channel>& channel) {
-    vlmv1::ConvertOptions options;
+// Per-preset generation parameters reach the wire: granite-docling and
+// smoldocling carry their docling stop strings and token budgets;
+// presets without stop strings omit the parameter.
+void verify_stop_and_max_tokens(const std::shared_ptr<grpc::Channel>& channel, FakeVlm* fake) {
+    vlmv1::ConvertOptions granite;  // default preset
+    Collected out = convert(channel, granite, {page(1, "PAGE1")});
+    require(out.status.ok(), "granite page OK: " + out.status.error_message());
+    nlohmann::json body = fake->last_request();
+    require(body["max_tokens"] == 8192, "granite-docling max_tokens is 8192");
+    require(body["stop"].is_array() && body["stop"].size() == 2 &&
+                body["stop"][0] == "</doctag>" && body["stop"][1] == "<|end_of_text|>",
+            "granite-docling stop strings on the wire");
+
+    vlmv1::ConvertOptions smol;
+    smol.set_preset(vlmv1::VLM_PRESET_SMOLDOCLING);
+    out = convert(channel, smol, {page(1, "PAGE1")});
+    require(out.status.ok(), "smoldocling page OK: " + out.status.error_message());
+    body = fake->last_request();
+    require(body["max_tokens"] == 4096, "smoldocling max_tokens is 4096");
+    require(body["stop"].is_array() && body["stop"].size() == 2 &&
+                body["stop"][0] == "</doctag>" && body["stop"][1] == "<end_of_utterance>",
+            "smoldocling stop strings on the wire");
+
+    vlmv1::ConvertOptions markdown;
+    markdown.set_preset(vlmv1::VLM_PRESET_DEEPSEEK_OCR);
+    out = convert(channel, markdown, {page(1, "MDPAGE1")});
+    require(out.status.ok(), "markdown page OK: " + out.status.error_message());
+    body = fake->last_request();
+    require(body["max_tokens"] == 4096, "markdown presets keep the 4096 default");
+    require(!body.contains("stop"), "presets without stop strings omit the parameter");
+}
+
+void verify_abort_on_error(const std::shared_ptr<grpc::Channel>& channel) {    vlmv1::ConvertOptions options;
     options.set_abort_on_error(true);
     Collected out = convert(channel, options, {page(1, "PAGE1"), page(2, "FAIL2")});
     require(out.status.error_code() == grpc::StatusCode::ABORTED,
@@ -415,6 +462,9 @@ void verify_service_info(const std::shared_ptr<grpc::Channel>& channel,
 }  // namespace
 
 int main() {
+    // The FAIL pages now retry per docling's policy; pin the backoff base
+    // to zero so persistent-failure tests don't sleep ~3s per page.
+    vlm::set_retry_backoff_base_ms(0);
     FakeVlm fake;
     fake.start();
     try {
@@ -424,8 +474,12 @@ int main() {
         config.vlm_timeout_seconds = 30;
         TestServer server(config);
 
+        const long calls_before = fake.calls.load();
         verify_streaming_and_failure_isolation(server.channel);
+        require(fake.calls.load() - calls_before > 3,
+                "the persistently-503 page was retried: more calls than pages");
         verify_markdown_and_raw_fallback(server.channel);
+        verify_stop_and_max_tokens(server.channel, &fake);
         verify_abort_on_error(server.channel);
         verify_error_matrix(server.channel);
         verify_no_endpoint();

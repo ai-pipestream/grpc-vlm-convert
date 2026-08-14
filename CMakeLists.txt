@@ -60,6 +60,14 @@ FetchContent_Declare(nlohmann_json
   GIT_SHALLOW TRUE)
 FetchContent_MakeAvailable(nlohmann_json)
 
+# stb (single-header, public domain / MIT): PNG decode + encode for the
+# picture-region crops the DocTags mapper attaches as ImageRefs. Headers
+# only — the implementation TU is src/mapping/image_crop.cpp.
+FetchContent_Declare(stb
+  GIT_REPOSITORY https://github.com/nothings/stb.git
+  GIT_TAG 2c980bb59875b0d32144a71867fbdebb2f77cd20)
+FetchContent_MakeAvailable(stb)
+
 # ---------------------------------------------------------------------------
 # Generated proto code. protoc and grpc_cpp_plugin are the fetched targets,
 # so no host protoc is required (buf handles lint only).
@@ -109,8 +117,11 @@ add_library(vlm_core STATIC
   src/mapping/markdown.cpp
   src/mapping/html.cpp
   src/mapping/otsl.cpp
+  src/mapping/image_crop.cpp
   src/service/vlm_convert_service.cpp)
 target_include_directories(vlm_core PUBLIC src)
+# stb headers as SYSTEM: third-party warnings must not trip -Werror.
+target_include_directories(vlm_core SYSTEM PRIVATE "${stb_SOURCE_DIR}")
 target_compile_definitions(vlm_core PRIVATE GRPC_VLM_VERSION="${PROJECT_VERSION}")
 target_link_libraries(vlm_core
   PUBLIC vlm_proto httplib::httplib nlohmann_json::nlohmann_json Threads::Threads
@@ -130,6 +141,8 @@ if(BUILD_TESTING)
   set(GRPC_VLM_TESTS
     doctags-mapper-test
     markdown-mapper-test
+    otsl-mapper-test
+    vlm-client-test
     vlm-convert-service-test
     vlm-golden-test)
   foreach(test_name IN LISTS GRPC_VLM_TESTS)

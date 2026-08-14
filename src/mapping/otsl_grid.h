@@ -10,8 +10,13 @@
 
 namespace vlm::mapping {
 
-// Parses OTSL cell tokens (<fcel>, <ecel>, <ched>, <rhed>, <nl>) into a
-// table grid. Returns false when the body holds no complete row.
+// Parses OTSL cell tokens into a table grid with docling's span
+// resolution: <lcel>/<ucel>/<xcel> filler cells extend their anchor
+// cell's col_span/row_span (and end offsets) and are not emitted;
+// <srow> starts a new (section) row; <nl> ends a row. The grid is the
+// full num_rows × num_cols matrix with anchors stamped over every
+// position their span covers. Returns false when the body holds no
+// complete row.
 bool parse_otsl_grid(const std::string& body,
                      ai::pipestream::document::v1::TableData* data);
 
