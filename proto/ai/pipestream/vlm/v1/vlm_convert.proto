@@ -1,0 +1,239 @@
+// grpc-vlm-convert wire contract: alternate page parse by a vision-language
+// model (Granite-Docling / SmolDocling class), mapping the model response
+// (DocTags / markdown / HTML / OTSL / plaintext) into the gRParse Document
+// data plane. The VLM itself lives in a separate server (llama.cpp, vLLM
+// OpenAI-compat, OVMS, KServe v2); this process is a CPU-bound mapper and
+// HTTP client — it never loads model weights.
+syntax = "proto3";
+
+package ai.pipestream.vlm.v1;
+
+import "ai/pipestream/document/v1/document.proto";
+
+// Streaming VLM page-parse collector.
+//
+// The product is the live event stream: a PageDocument is emitted the
+// moment that page's VLM call returns, in completion order (pages may
+// finish out of order; every event carries its page_no). ConvertComplete
+// is a trailer with counts, not the payload. A UI paints each page as it
+// arrives; the coordinator merges fragments keyed on page_no.
+service VlmConvertService {
+  // Bidirectional page-conversion stream.
+  //
+  // The client sends exactly one ConvertOptions as the first message, then
+  // one PageImage per page (the preferred path — the caller already
+  // rendered PNGs) or PdfChunk messages for the server-side rasterize
+  // fallback, then half-closes. The server replies with PageStarted as
+  // each page enters the model queue, PageDocument (or PageRaw when
+  // mapping fails or the endpoint errors) in completion order, and a
+  // single ConvertComplete trailer.
+  //
+  // Errors: no endpoint configured (and no per-request override) is
+  // FAILED_PRECONDITION; pages above the byte or page-count cap are
+  // RESOURCE_EXHAUSTED; malformed input (missing options, non-PNG page
+  // bytes, zero page_no) is INVALID_ARGUMENT; PDF input without a
+  // rasterizer built in is UNIMPLEMENTED.
+  rpc ConvertPages(stream ConvertPagesRequest) returns (stream ConvertPagesResponse);
+
+  // Reports the server build, the configured endpoint, and which presets
+  // that endpoint claims to serve. Never triggers a model download.
+  rpc GetServiceInfo(GetServiceInfoRequest) returns (GetServiceInfoResponse);
+}
+
+// One client-to-server message on the ConvertPages stream.
+message ConvertPagesRequest {
+  // Exactly one payload kind per message.
+  oneof payload {
+    // Must be the first message on the stream and must not repeat.
+    ConvertOptions options = 1;
+    // One rendered page. Pages may arrive in any order keyed by page_no.
+    PageImage page_image = 2;
+    // A chunk of an encoded PDF, in file order (fallback input; the server
+    // rasterizes when it has a rasterizer built in).
+    PdfChunk pdf_chunk = 3;
+  }
+}
+
+// Per-stream conversion options, sent once as the first message.
+message ConvertOptions {
+  // Model preset, mirroring Docling's VlmModelType vocabulary. Combined
+  // with preset_raw for open vocabularies: set preset to
+  // VLM_PRESET_RAW and put the endpoint's model name in preset_raw.
+  VlmPreset preset = 1;
+
+  // Free-form model name, forwarded verbatim to the endpoint when preset
+  // is VLM_PRESET_RAW. Unknown names are never validated locally — the
+  // endpoint answers.
+  string preset_raw = 2;
+
+  // Response format the mapper should expect. Unspecified means the
+  // preset's default (DocTags for SmolDocling / Granite-Docling, markdown
+  // otherwise).
+  ResponseFormat response_format = 3;
+
+  // Prompt override. Empty means the preset's default prompt.
+  string prompt = 4;
+
+  // Page raster scale hint. The coordinator honors this when it is the
+  // renderer; this server only records it when the caller already sent
+  // PNGs. Zero means the server default.
+  double scale = 5;
+
+  // Per-request endpoint override (scheme://host:port, OpenAI-compatible
+  // /v1/chat/completions). Empty means the configured server endpoint.
+  // When both are empty the RPC fails with FAILED_PRECONDITION.
+  string endpoint = 6;
+
+  // Pages in flight against the VLM for this stream. Zero means the
+  // server default; values above the configured maximum are clamped.
+  uint32 concurrency = 7;
+
+  // When true, a single page failure fails the whole stream. Default
+  // false: a failed page produces a PageRaw error event and the rest of
+  // the document still converts.
+  bool abort_on_error = 8;
+}
+
+// Vision-language model presets, mirroring Docling's VlmModelType.
+enum VlmPreset {
+  // Defaults to VLM_PRESET_GRANITE_DOCLING.
+  VLM_PRESET_UNSPECIFIED = 0;
+  // HuggingFaceTB SmolDocling; DocTags output.
+  VLM_PRESET_SMOLDOCLING = 1;
+  // IBM Granite-Docling (258M class); DocTags output.
+  VLM_PRESET_GRANITE_DOCLING = 2;
+  // GOT-OCR-2.0.
+  VLM_PRESET_GOT_OCR_2 = 3;
+  // IBM Granite Vision (non-Docling); markdown output.
+  VLM_PRESET_GRANITE_VISION = 4;
+  // DeepSeek-OCR; markdown output.
+  VLM_PRESET_DEEPSEEK_OCR = 5;
+  // Nanonets-OCR2; markdown output.
+  VLM_PRESET_NANONETS_OCR2 = 6;
+  // GLM-OCR; markdown output.
+  VLM_PRESET_GLM_OCR = 7;
+  // LightOnOCR; markdown output.
+  VLM_PRESET_LIGHTON_OCR = 8;
+  // Open vocabulary: preset_raw carries the endpoint's model name
+  // (Unlimited-OCR, Dolphin, Chandra, dots.ocr, ...).
+  VLM_PRESET_RAW = 9;
+}
+
+// Model response formats this service can map into Document items.
+enum ResponseFormat {
+  // The preset's default format.
+  RESPONSE_FORMAT_UNSPECIFIED = 0;
+  // Docling DocTags with <loc_*> locations; the only format carrying
+  // real per-item bounding boxes.
+  RESPONSE_FORMAT_DOCTAGS = 1;
+  // Markdown; headings, lists, fenced code, and pipe tables map to
+  // labeled items with page-level provenance only.
+  RESPONSE_FORMAT_MARKDOWN = 2;
+  // HTML snippet; tags map to labeled items with page-level provenance.
+  RESPONSE_FORMAT_HTML = 3;
+  // OTSL table markup; maps to a single table item.
+  RESPONSE_FORMAT_OTSL = 4;
+  // Unstructured text; one TextItem per page.
+  RESPONSE_FORMAT_PLAINTEXT = 5;
+}
+
+// One rendered page, PNG-encoded, as the coordinator's CV path already
+// produces. Sending these avoids a second rasterizer in this process.
+message PageImage {
+  // PNG-encoded page raster.
+  bytes png = 1;
+  // 1-based page number. Events key on this; out-of-order is legal.
+  uint32 page_no = 2;
+  // Raster width in pixels, used to scale DocTags locations to pixels.
+  uint32 width = 3;
+  // Raster height in pixels, used to scale DocTags locations to pixels.
+  uint32 height = 4;
+}
+
+// A chunk of an encoded PDF (fallback input style).
+message PdfChunk {
+  // Raw bytes of the PDF file, in order.
+  bytes data = 1;
+}
+
+// One server-to-client event on the ConvertPages stream.
+message ConvertPagesResponse {
+  // Exactly one event kind per message.
+  oneof event {
+    // A page entered the model queue. Emitted as the page arrives, before
+    // its VLM call starts.
+    PageStarted page_started = 1;
+    // A converted page: a Document fragment carrying that page's items,
+    // pictures, and tables with page provenance.
+    PageDocument page_document = 2;
+    // Fallback for a page: the model's raw text when mapping failed, or
+    // an error when the endpoint failed. Never both absent.
+    PageRaw page_raw = 3;
+    // Trailer: aggregate counts for the finished stream.
+    ConvertComplete complete = 4;
+  }
+}
+
+// A page entered the model queue.
+message PageStarted {
+  // 1-based page number that started.
+  uint32 page_no = 1;
+}
+
+// A converted page as a Document fragment. Fragments merge with the same
+// additive rules as other collectors; items carry a CollectorSource
+// ("vlm-convert", the model name, and the endpoint's confidence when it
+// reports logprobs).
+message PageDocument {
+  // 1-based page number this fragment belongs to.
+  uint32 page_no = 1;
+  // The page's items. DocTags responses carry real bounding boxes;
+  // markdown/HTML/plaintext responses carry the full-page box only.
+  ai.pipestream.document.v1.Document document = 2;
+}
+
+// Unmapped model output or a page failure.
+message PageRaw {
+  // 1-based page number.
+  uint32 page_no = 1;
+  // The model's raw response text, when the call succeeded but mapping
+  // failed. Empty on endpoint failure.
+  string text = 2;
+  // What went wrong, when this event reports a failure (endpoint error,
+  // or the mapping failure reason alongside text). Empty when unset.
+  string error = 3;
+}
+
+// Trailer summarizing the finished conversion.
+message ConvertComplete {
+  // Total pages that entered the model queue.
+  uint32 pages_started = 1;
+  // Pages that produced a PageDocument.
+  uint32 pages_ok = 2;
+  // Pages that produced a PageRaw (mapping failure or endpoint error).
+  uint32 pages_failed = 3;
+}
+
+// Request for GetServiceInfo. Empty by design.
+message GetServiceInfoRequest {}
+
+// Build and capability facts for this server process.
+message GetServiceInfoResponse {
+  // Semantic version of this server build.
+  string version = 1;
+  // Configured VLM endpoint, e.g. "http://vlm:8080". Empty when none is
+  // configured; ConvertPages then requires a per-request endpoint.
+  string endpoint = 2;
+  // Built-in presets the configured endpoint claims to serve.
+  repeated VlmPreset presets = 3;
+  // Raw model names the configured endpoint claims to serve, beyond the
+  // built-in vocabulary.
+  repeated string raw_presets = 4;
+  // Maximum pages in flight against the VLM per stream.
+  uint32 concurrency = 5;
+  // Maximum accepted PNG size per page in bytes; larger pages fail with
+  // RESOURCE_EXHAUSTED.
+  uint64 max_page_bytes = 6;
+  // Maximum pages per stream; more pages fail with RESOURCE_EXHAUSTED.
+  uint32 max_pages = 7;
+}
