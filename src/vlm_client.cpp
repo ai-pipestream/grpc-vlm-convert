@@ -1,5 +1,6 @@
 #include "vlm_client.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -65,6 +66,10 @@ bool split_endpoint(const std::string& endpoint, std::string* origin, std::strin
     } else {
         *origin = endpoint.substr(0, slash);
         *path = endpoint.substr(slash);
+        // Trailing slashes would produce "//v1/chat/completions".
+        while (!path->empty() && path->back() == '/') {
+            path->pop_back();
+        }
     }
     return true;
 }
@@ -168,14 +173,25 @@ VlmResult generate(const VlmCall& call) {
             double sum = 0.0;
             size_t count = 0;
             for (const auto& token : logprobs) {
-                if (token["logprob"].is_number()) {
-                    sum += token["logprob"].get<double>();
+                // Endpoints emit malformed logprob entries in the wild;
+                // anything that is not an object with a numeric logprob
+                // is skipped. (const operator[] here would throw — or
+                // worse — on non-objects and missing keys.)
+                if (!token.is_object()) {
+                    continue;
+                }
+                const auto logprob = token.find("logprob");
+                if (logprob != token.end() && logprob->is_number()) {
+                    sum += logprob->get<double>();
                     count++;
                 }
             }
             if (count > 0) {
                 result.has_confidence = true;
-                result.confidence = std::exp(sum / static_cast<double>(count));
+                // Positive logprobs are endpoint garbage; keep the
+                // probability in [0, 1] anyway.
+                result.confidence =
+                    std::min(1.0, std::exp(sum / static_cast<double>(count)));
             }
         }
     }

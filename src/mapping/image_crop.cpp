@@ -63,13 +63,19 @@ bool crop_png_image(const std::string& png, double left, double top, double righ
     }
 
     // The box is in the declared page raster coordinates; scale into the
-    // decoded image's actual pixels before clamping.
+    // decoded image's actual pixels before clamping. Clamping happens in
+    // the double domain: casting an out-of-range double to int is UB, and
+    // hostile loc values can drive the box far outside the raster.
     const double sx = page_width > 0 ? static_cast<double>(width) / page_width : 1.0;
     const double sy = page_height > 0 ? static_cast<double>(height) / page_height : 1.0;
-    const int x1 = std::clamp(static_cast<int>(std::floor(left * sx)), 0, width);
-    const int y1 = std::clamp(static_cast<int>(std::floor(top * sy)), 0, height);
-    const int x2 = std::clamp(static_cast<int>(std::ceil(right * sx)), 0, width);
-    const int y2 = std::clamp(static_cast<int>(std::ceil(bottom * sy)), 0, height);
+    const int x1 = static_cast<int>(std::clamp(std::floor(left * sx), 0.0,
+                                               static_cast<double>(width)));
+    const int y1 = static_cast<int>(std::clamp(std::floor(top * sy), 0.0,
+                                               static_cast<double>(height)));
+    const int x2 = static_cast<int>(std::clamp(std::ceil(right * sx), 0.0,
+                                               static_cast<double>(width)));
+    const int y2 = static_cast<int>(std::clamp(std::ceil(bottom * sy), 0.0,
+                                               static_cast<double>(height)));
     if (x2 <= x1 || y2 <= y1) {
         stbi_image_free(pixels);
         return false;

@@ -26,18 +26,28 @@ std::vector<std::string> split_pipe_row(const std::string& line) {
     if (!row.empty() && row.front() == '|') {
         row.erase(0, 1);
     }
-    if (!row.empty() && row.back() == '|') {
-        row.pop_back();
-    }
+    // Split on unescaped pipes only: "\|" is cell content (a literal
+    // pipe), never a column boundary.
     std::vector<std::string> cells;
-    size_t start = 0;
-    while (start <= row.size()) {
-        size_t pipe = row.find('|', start);
-        if (pipe == std::string::npos) {
-            pipe = row.size();
+    std::string cell;
+    size_t last_boundary = std::string::npos;
+    for (size_t i = 0; i < row.size(); i++) {
+        if (row[i] == '\\' && i + 1 < row.size() && row[i + 1] == '|') {
+            cell += '|';
+            i++;
+        } else if (row[i] == '|') {
+            cells.push_back(trim(cell));
+            cell.clear();
+            last_boundary = i;
+        } else {
+            cell += row[i];
         }
-        cells.push_back(trim(row.substr(start, pipe - start)));
-        start = pipe + 1;
+    }
+    cells.push_back(trim(cell));
+    // A trailing unescaped pipe closes the last cell rather than opening
+    // an empty one.
+    if (!row.empty() && last_boundary == row.size() - 1) {
+        cells.pop_back();
     }
     return cells;
 }
@@ -73,6 +83,17 @@ void emit_pipe_table(const std::vector<std::string>& lines, const PageContext& p
             cell.set_end_col_offset_idx(static_cast<int32_t>(c + 1));
             *grid_row->add_cells() = cell;
             *data->add_table_cells() = cell;
+        }
+        // Ragged source rows still produce a rectangular grid (docling's
+        // grid invariant): pad with empty 1x1 cells up to num_cols.
+        for (size_t c = rows[r].size(); c < num_cols; c++) {
+            docv1::TableCell* empty = grid_row->add_cells();
+            empty->set_row_span(1);
+            empty->set_col_span(1);
+            empty->set_start_row_offset_idx(static_cast<int32_t>(r));
+            empty->set_end_row_offset_idx(static_cast<int32_t>(r + 1));
+            empty->set_start_col_offset_idx(static_cast<int32_t>(c));
+            empty->set_end_col_offset_idx(static_cast<int32_t>(c + 1));
         }
     }
 }
@@ -139,8 +160,17 @@ bool map_markdown(const std::string& text, const PageContext& page, docv1::Docum
         if (hashes >= 1 && hashes <= 6 && hashes < stripped.size() &&
             std::isspace(static_cast<unsigned char>(stripped[hashes]))) {
             flush_paragraph();
-            add_section_header(out, page, static_cast<int>(hashes), page_prov(page),
-                               trim(stripped.substr(hashes)));
+            std::string heading = trim(stripped.substr(hashes));
+            // ATX optional closing sequence: a trailing run of '#'s
+            // preceded by whitespace (or the whole content) comes off.
+            const size_t last_non_hash = heading.find_last_not_of('#');
+            if (last_non_hash == std::string::npos) {
+                heading.clear();
+            } else if (last_non_hash + 1 < heading.size() &&
+                       (heading[last_non_hash] == ' ' || heading[last_non_hash] == '\t')) {
+                heading = trim(heading.substr(0, last_non_hash));
+            }
+            add_section_header(out, page, static_cast<int>(hashes), page_prov(page), heading);
             items++;
             continue;
         }

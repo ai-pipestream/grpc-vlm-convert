@@ -1,6 +1,7 @@
 #include "otsl_grid.h"
 
 #include <algorithm>
+#include <cctype>
 #include <vector>
 
 #include "builder.h"
@@ -29,21 +30,35 @@ bool is_vertical_filler(const std::string& tag) {
     return tag == "ucel" || tag == "xcel";
 }
 
-// Reads one token: the tag name, then the text up to the next '<'.
+// The next token opener: a '<' followed by a letter. A '<' followed by
+// anything else is literal cell text, not markup.
+size_t find_tag(const std::string& body, size_t from) {
+    size_t open = from;
+    while ((open = body.find('<', open)) != std::string::npos) {
+        if (open + 1 < body.size() &&
+            std::isalpha(static_cast<unsigned char>(body[open + 1])) != 0) {
+            return open;
+        }
+        open++;
+    }
+    return std::string::npos;
+}
+
+// Reads one token: the tag name, then the text up to the next tag.
 // Returns the tag (empty at end of input) and advances `pos` past the text.
 std::string next_token(const std::string& body, size_t* pos, std::string* text) {
-    size_t open = body.find('<', *pos);
+    const size_t open = find_tag(body, *pos);
     if (open == std::string::npos) {
         *pos = body.size();
         return "";
     }
-    size_t close = body.find('>', open);
+    const size_t close = body.find('>', open);
     if (close == std::string::npos) {
         *pos = body.size();
         return "";
     }
     std::string tag = body.substr(open + 1, close - open - 1);
-    size_t next = body.find('<', close);
+    const size_t next = find_tag(body, close + 1);
     *text = trim(body.substr(close + 1, next == std::string::npos ? next : next - close - 1));
     *pos = next == std::string::npos ? body.size() : next;
     return tag;

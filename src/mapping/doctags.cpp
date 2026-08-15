@@ -681,6 +681,14 @@ bool emit_inline_group(const std::string& chunk, const PageContext& page,
         if (open == std::string::npos) {
             break;
         }
+        // A '<' that cannot open a tag is literal text; skip it (same
+        // rule as the main tokenizer).
+        if (open + 1 == content.size() ||
+            (!std::isalpha(static_cast<unsigned char>(content[open + 1])) &&
+             content[open + 1] != '/' && content[open + 1] != '_')) {
+            pos = open + 1;
+            continue;
+        }
         const size_t gt = content.find('>', open);
         if (gt == std::string::npos) {
             break;
@@ -772,12 +780,24 @@ bool map_doctags(const std::string& text, const PageContext& page, docv1::Docume
             }
             break;
         }
-        size_t close = text.find('>', open);
-        if (close == std::string::npos) {
-            break;  // truncated tag: keep what parsed
+        // A '<' that cannot open a tag is literal text, not markup —
+        // docling's tag regex requires a letter, '/', or '_' next.
+        if (open + 1 == text.size() ||
+            (!std::isalpha(static_cast<unsigned char>(text[open + 1])) &&
+             text[open + 1] != '/' && text[open + 1] != '_')) {
+            if (element_open) {
+                (in_caption ? current.caption_text : current.text) +=
+                    text.substr(pos, open - pos + 1);
+            }
+            pos = open + 1;
+            continue;
         }
         if (element_open && open > pos) {
             (in_caption ? current.caption_text : current.text) += text.substr(pos, open - pos);
+        }
+        size_t close = text.find('>', open);
+        if (close == std::string::npos) {
+            break;  // truncated tag: keep what parsed
         }
         std::string token = text.substr(open + 1, close - open - 1);
         pos = close + 1;

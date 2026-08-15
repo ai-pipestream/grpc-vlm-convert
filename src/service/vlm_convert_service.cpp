@@ -111,6 +111,13 @@ grpc::Status VlmConvertServiceImpl::ConvertPages(
         return client_error(grpc::StatusCode::INVALID_ARGUMENT,
                             "preset resolves to no model name (set preset or preset_raw)");
     }
+    // Proto3 keeps unknown enum ints; an unresolvable format would surface
+    // as a per-page mapping failure only after paying for the VLM call.
+    if (!vlmv1::ResponseFormat_IsValid(format)) {
+        return client_error(grpc::StatusCode::INVALID_ARGUMENT,
+                            "unknown response_format value: " +
+                                std::to_string(static_cast<int>(format)));
+    }
     const size_t concurrency =
         options.concurrency() == 0
             ? config_.concurrency
@@ -142,7 +149,6 @@ grpc::Status VlmConvertServiceImpl::ConvertPages(
                     continue;
                 }
                 vlmv1::ConvertPagesResponse event;
-                VlmResult result = generate(job.call);
                 mapping::PageContext page;
                 page.page_no = job.image.page_no();
                 page.width = job.image.width();
@@ -150,6 +156,10 @@ grpc::Status VlmConvertServiceImpl::ConvertPages(
                 page.png = job.image.png();
                 page.source.set_collector("vlm-convert");
                 page.source.set_model(job.model);
+                // The raster then moves into the call rather than riding
+                // the queue twice (once on the image, once on the call).
+                job.call.png = std::move(*job.image.mutable_png());
+                VlmResult result = generate(job.call);
                 if (result.has_confidence) {
                     page.source.set_confidence(result.confidence);
                 }
@@ -241,7 +251,6 @@ grpc::Status VlmConvertServiceImpl::ConvertPages(
         job.call.prompt = prompt;
         job.call.stop = stop;
         job.call.max_tokens = max_tokens;
-        job.call.png = image.png();
         job.call.timeout_seconds = static_cast<long>(config_.vlm_timeout_seconds);
         job.format = format;
         job.model = model;
