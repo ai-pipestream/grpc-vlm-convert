@@ -112,6 +112,7 @@ add_library(vlm_core STATIC
   src/config.cpp
   src/presets.cpp
   src/vlm_client.cpp
+  src/http_gateway.cpp
   src/mapping/mapper.cpp
   src/mapping/doctags.cpp
   src/mapping/markdown.cpp
@@ -141,6 +142,7 @@ if(BUILD_TESTING)
   set(GRPC_VLM_TESTS
     adversarial-test
     doctags-mapper-test
+    http-api-test
     markdown-mapper-test
     otsl-mapper-test
     vlm-client-test

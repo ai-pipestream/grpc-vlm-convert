@@ -79,6 +79,16 @@ VlmConvertServiceImpl::VlmConvertServiceImpl(const Config& config) : config_(con
 grpc::Status VlmConvertServiceImpl::ConvertPages(
     grpc::ServerContext* context,
     grpc::ServerReaderWriter<vlmv1::ConvertPagesResponse, vlmv1::ConvertPagesRequest>* stream) {
+    return ConvertPagesCore(
+        [&](vlmv1::ConvertPagesRequest* request) { return stream->Read(request); },
+        [&](const vlmv1::ConvertPagesResponse& event) { return stream->Write(event); },
+        [&] { return context->IsCancelled(); });
+}
+
+grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
+    const ConvertRead& read, const ConvertWrite& write,
+    const std::function<bool()>& cancelled) {
+    auto is_cancelled = [&] { return cancelled != nullptr && cancelled(); };
     auto client_error = [&](grpc::StatusCode code, const std::string& message) {
         rejected++;
         return grpc::Status(code, message);
@@ -86,7 +96,7 @@ grpc::Status VlmConvertServiceImpl::ConvertPages(
 
     // First message is the options; it chooses the input style.
     vlmv1::ConvertPagesRequest request;
-    if (!stream->Read(&request) || !request.has_options()) {
+    if (!read(&request) || !request.has_options()) {
         return client_error(grpc::StatusCode::INVALID_ARGUMENT,
                             "first stream message must be ConvertOptions");
     }
@@ -133,8 +143,8 @@ grpc::Status VlmConvertServiceImpl::ConvertPages(
     std::thread writer([&] {
         vlmv1::ConvertPagesResponse event;
         while (events.pop(&event)) {
-            if (!stream->Write(event)) {
-                return;  // client gone; producers see the cancelled context
+            if (!write(event)) {
+                return;  // consumer gone; producers see the cancelled flag
             }
         }
     });
@@ -145,7 +155,7 @@ grpc::Status VlmConvertServiceImpl::ConvertPages(
         workers.emplace_back([&] {
             PageJob job;
             while (jobs.pop(&job)) {
-                if (context->IsCancelled()) {
+                if (is_cancelled()) {
                     continue;
                 }
                 vlmv1::ConvertPagesResponse event;
@@ -196,7 +206,7 @@ grpc::Status VlmConvertServiceImpl::ConvertPages(
     // events reach the client while later pages are still uploading.
     grpc::Status status = grpc::Status::OK;
     bool saw_input = false;
-    while (stream->Read(&request)) {
+    while (read(&request)) {
         if (request.has_options()) {
             status = client_error(grpc::StatusCode::INVALID_ARGUMENT,
                                   "ConvertOptions must not repeat on the stream");
@@ -266,7 +276,7 @@ grpc::Status VlmConvertServiceImpl::ConvertPages(
     if (!status.ok()) {
         return status;
     }
-    if (context->IsCancelled()) {
+    if (is_cancelled()) {
         return grpc::Status(grpc::StatusCode::CANCELLED, "client cancelled the stream");
     }
     if (!saw_input) {
@@ -285,7 +295,7 @@ grpc::Status VlmConvertServiceImpl::ConvertPages(
     trailer->set_pages_started(started.load());
     trailer->set_pages_ok(ok.load());
     trailer->set_pages_failed(page_failed.load());
-    stream->Write(complete);
+    write(complete);
 
     converted++;
     pages_ok += ok.load();

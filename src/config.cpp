@@ -66,6 +66,14 @@ Config load_config_from_env() {
         configured_size("GRPC_VLM_VLM_TIMEOUT_SECONDS", config.vlm_timeout_seconds, 1, 86400);
     config.metrics_interval_seconds = configured_size(
         "GRPC_VLM_METRICS_INTERVAL_SECONDS", config.metrics_interval_seconds, 0, 86400);
+    // 0 or empty disables the HTTP listener; an explicit value must be a
+    // real port.
+    const char* http_port = std::getenv("GRPC_VLM_HTTP_PORT");
+    if (http_port != nullptr && (*http_port == '\0' || std::string(http_port) == "0")) {
+        config.http_port = 0;
+    } else {
+        config.http_port = configured_size("GRPC_VLM_HTTP_PORT", config.http_port, 1, 65535);
+    }
     return config;
 }
 

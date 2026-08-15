@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 
 #include "ai/pipestream/vlm/v1/vlm_convert.grpc.pb.h"
 #include "config.h"
@@ -17,6 +18,19 @@ class VlmConvertServiceImpl final
     : public ai::pipestream::vlm::v1::VlmConvertService::Service {
   public:
     explicit VlmConvertServiceImpl(const Config& config);
+
+    // Transport-independent ConvertPages pipeline. `read` yields the next
+    // client message (options first, then pages; false = half-close),
+    // `write` consumes one stream event (false = consumer gone, mirrors a
+    // failed gRPC Write), `cancelled` mirrors ServerContext::IsCancelled.
+    // The gRPC override below is a thin adapter over this; the HTTP front
+    // end drives it directly, so both transports share one pipeline.
+    using ConvertRead =
+        std::function<bool(ai::pipestream::vlm::v1::ConvertPagesRequest*)>;
+    using ConvertWrite =
+        std::function<bool(const ai::pipestream::vlm::v1::ConvertPagesResponse&)>;
+    grpc::Status ConvertPagesCore(const ConvertRead& read, const ConvertWrite& write,
+                                  const std::function<bool()>& cancelled);
 
     grpc::Status ConvertPages(
         grpc::ServerContext* context,

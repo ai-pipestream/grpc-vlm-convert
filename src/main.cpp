@@ -15,6 +15,7 @@
 #include <grpcpp/health_check_service_interface.h>
 
 #include "config.h"
+#include "http_gateway.h"
 #include "service/vlm_convert_service.h"
 
 namespace {
@@ -61,6 +62,15 @@ int main() {
             return 1;
         }
 
+        // The HTTP/JSON front end shares the service instance (and its
+        // metrics) with gRPC; GRPC_VLM_HTTP_PORT 0/empty leaves it off.
+        vlm::HttpGateway http_gateway(config, service);
+        if (config.http_port != 0 &&
+            !http_gateway.start("0.0.0.0", static_cast<int>(config.http_port))) {
+            std::cerr << "Unable to listen on 0.0.0.0:" << config.http_port << " (HTTP)\n";
+            return 1;
+        }
+
         std::thread shutdown_thread([&server] {
             char byte = 0;
             [[maybe_unused]] ssize_t n = ::read(g_shutdown_pipe[0], &byte, 1);
@@ -89,11 +99,16 @@ int main() {
         }
 
         std::cout << "grpc-vlm-convert listening on " << config.listen_address
+                  << (config.http_port != 0
+                          ? " (HTTP on 0.0.0.0:" + std::to_string(config.http_port) + ")"
+                          : "")
                   << " (endpoint "
                   << (config.endpoint.empty() ? "<none — per-request override required>"
                                               : config.endpoint)
                   << ")" << std::endl;
         server->Wait();
+
+        http_gateway.stop();
 
         // Wake the shutdown thread if Wait() returned for another reason.
         handle_shutdown(0);

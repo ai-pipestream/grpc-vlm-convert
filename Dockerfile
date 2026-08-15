@@ -36,5 +36,5 @@ ENV GRPC_VLM_LISTEN_ADDRESS=0.0.0.0:50058
 #   docker run --rm --read-only -e GRPC_VLM_ENDPOINT=http://vlm:8080 \
 #     -p 50058:50058 grpc-vlm-convert
 USER 65532:65532
-EXPOSE 50058
+EXPOSE 50058 50059
 ENTRYPOINT ["/usr/local/bin/grpc-vlm-convert-server"]

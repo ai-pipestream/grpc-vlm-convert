@@ -27,6 +27,9 @@ struct Config {
     size_t vlm_timeout_seconds = 300;
     // 0 disables the stdout metrics line.
     size_t metrics_interval_seconds = 60;
+    // HTTP/JSON front-end port (POST /v1/convert, /v1/convert/stream,
+    // GET /healthz). 0 disables the HTTP listener.
+    size_t http_port = 50059;
 };
 
 // Reads and validates the environment. Throws std::invalid_argument with
