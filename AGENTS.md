@@ -1,14 +1,16 @@
-# AGENTS.md — grpc-vlm-convert
+# AGENTS.md: grpc-vlm-convert
 
-You are implementing **grpc-vlm-convert** from scratch in this repo. There is no
-application code yet. Specs are the source of truth.
+The v1 server is implemented in this repo (C++ in `src/`, tests in
+`tests/`, proto in `proto/`). The specs in `docs/` remain the source of
+truth for behavior; when code and a spec disagree, fix the spec or the
+code, not both silently.
 
 ## Read this first, in order
 
 1. This file
-2. `docs/architecture.md` — fleet boundary, language, what we refuse to own
-3. `docs/design.md` — wire API sketch, Document mapping, tests
-4. `docs/guidelines.md` — fleet rules (streaming, proto, git, tests)
+2. `docs/architecture.md`: fleet boundary, language, what we refuse to own
+3. `docs/design.md`: wire API, Document mapping, tests
+4. `docs/guidelines.md`: fleet rules (streaming, proto, git, tests)
 
 Do not start coding until those four are in your context. If architecture
 and an existing sibling disagree on *process* (diskless, health, buf),
@@ -17,16 +19,19 @@ plane), follow architecture.md.
 
 ## This service
 
-gRPC VLM convert collector: Granite-Docling / SmolDocling-class page parse into the gRParse Document data plane
+gRPC VLM convert collector: vision-language-model page parse into the
+gRParse Document data plane.
 
-- **Language:** C++ mapper + HTTP/gRPC client to a VLM server. Prefer PNG pages from the caller; PDF rasterize is fallback.
-- **Copy from:** /work/main/grpc-services/gRParse (Document, page stream) and Docling's VlmPipeline only as the *reference for prompts/response shapes*, not the runtime.
-- **Stack:** Alternate parse, not enrichment. Preset enum + preset_raw. No HF download at RPC time. FAILED_PRECONDITION if no endpoint.
+- **Language:** C++ mapper plus an HTTP/gRPC client to a VLM server. Prefer PNG pages from the caller; PDF rasterize is the fallback.
+- **Copy from:** `/work/main/grpc-services/gRParse` (Document, page stream). Prompt and response-shape behavior is specified in `docs/design.md` and pinned by the tests.
+- **Stack:** Alternate parse, not enrichment. Preset enum + preset_raw. No Hugging Face download at RPC time. FAILED_PRECONDITION if no endpoint.
 - **Live stream:** PageStarted / PageDocument as *that page's* VLM returns (out-of-order OK with page_no). ConvertComplete trailer. Do not wait for the last page.
 
 ## Definition of done (v1)
 
-ConvertPages stream, fake VLM returning canned DocTags+markdown, page-2 failure does not block page 3, health+reflection, Dockerfile.
+ConvertPages stream, fake VLM returning canned DocTags + markdown, page-2
+failure does not block page 3, health + reflection, Dockerfile. All of
+this ships; keep it green.
 
 Also: README with build/run; proto lint clean; tests that fail if someone
 turns the stream back into a batch (assert an event before the input is
@@ -39,4 +44,4 @@ Git: `origin` = Forgejo (push `main` here). `github` = GitHub mirror.
 Never merge GitHub `main`. See `docs/guidelines.md`.
 
 gRParse wiring (`COLLECTOR_*` enum, endpoint env) is a **follow-up**.
-Ship a working server in this repo first.
+The working server lives in this repo.
