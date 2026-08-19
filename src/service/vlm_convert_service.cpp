@@ -329,6 +329,12 @@ grpc::Status VlmConvertServiceImpl::GetServiceInfo(
     response->set_concurrency(static_cast<uint32_t>(config_.concurrency));
     response->set_max_page_bytes(config_.max_page_bytes);
     response->set_max_pages(static_cast<uint32_t>(config_.max_pages));
+    // Shared-shell frontend advertisement; the values are fixed for this
+    // service, not configuration.
+    auto* ui = response->mutable_ui();
+    ui->set_title("VLM Convert");
+    ui->set_path("/ui/vlm-convert");
+    ui->set_description("Calls an external VLM server for document conversion");
     return grpc::Status::OK;
 }
 

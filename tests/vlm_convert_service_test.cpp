@@ -440,6 +440,9 @@ void verify_service_info(const std::shared_ptr<grpc::Channel>& channel,
     require(info.presets_size() == 8, "all built-in presets reported by default");
     require(info.concurrency() > 0 && info.max_page_bytes() > 0 && info.max_pages() > 0,
             "limits reported");
+    require(info.ui().title() == "VLM Convert" && info.ui().path() == "/ui/vlm-convert" &&
+                info.ui().description() == "Calls an external VLM server for document conversion",
+            "shared-shell ui advertisement reported");
 
     // A configured preset list maps known names to enums and forwards the
     // rest as raw names.

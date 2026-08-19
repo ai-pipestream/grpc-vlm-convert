@@ -37,6 +37,10 @@ rpc GetServiceInfo(GetServiceInfoRequest) returns (GetServiceInfoResponse);
 (The design sketch named the event stream `ConvertPagesEvent`; the proto
 ships it as `ConvertPagesResponse`.)
 
+`GetServiceInfoResponse` carries a `UiInfo` block (title, path,
+description), the same shape in every ai-pipestream service; the shared
+demo shell reads it to build its tab bar.
+
 Two input styles, first message chooses: `pdf_chunk` messages the server
 rasterizes (fallback), or repeated `page_image` with PNG + page_no +
 width/height (preferred).

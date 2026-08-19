@@ -112,6 +112,8 @@ Clients stream `ConvertPagesRequest` (one `ConvertOptions`, then one
 moment its VLM call returns, out-of-order pages are legal and key on
 `page_no`. A `ConvertComplete` trailer closes the stream. Health
 (`grpc.health.v1.Health`) and server reflection are registered.
+`GetServiceInfo` also carries a `UiInfo` block (title, path,
+description) advertising this service's tab to the shared demo shell.
 
 Docker: `docker build -t grpc-vlm-convert .` The build stage runs the
 test suite and gates the image; the runtime is diskless (`--read-only`).

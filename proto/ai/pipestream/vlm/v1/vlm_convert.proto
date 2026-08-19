@@ -236,4 +236,17 @@ message GetServiceInfoResponse {
   uint64 max_page_bytes = 6;
   // Maximum pages per stream; more pages fail with RESOURCE_EXHAUSTED.
   uint32 max_pages = 7;
+  // Frontend advertisement for the shared demo shell.
+  UiInfo ui = 8;
+}
+
+// Frontend advertisement. Same shape in every ai-pipestream grpc service:
+// the demo shell reads it to build its tab bar.
+message UiInfo {
+  // Tab title, e.g. "VLM Convert".
+  string title = 1;
+  // Shell mount path, e.g. "/ui/vlm-convert".
+  string path = 2;
+  // One line, used as the tab tooltip.
+  string description = 3;
 }
