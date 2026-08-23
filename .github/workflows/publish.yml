@@ -5,8 +5,10 @@ name: Publish Images
 # also tags that version. Docker Hub credentials come from the DOCKER_USER /
 # DOCKER_TOKEN org secrets.
 #
-# Multi-arch (amd64 + arm64): the runtime base (ubuntu:26.04) is published
-# for the two platforms, and the C++ build runs under QEMU for the arm64 leg.
+# amd64 only: the image compiles gRPC and the C++ service from source,
+# and the emulated arm64 leg under QEMU did not finish after six hours.
+# The arm64 build can return when it has native runners (same precedent as
+# grpc-asr and grpc-libreoffice).
 on:
   push:
     branches: [main]
@@ -22,8 +24,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Log in to Docker Hub (docker.io)
@@ -44,7 +44,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: true
           provenance: false
           sbom: false
