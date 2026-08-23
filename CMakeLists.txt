@@ -47,7 +47,7 @@ FetchContent_MakeAvailable(grpc)
 # only — VLM servers sit on the pod network, no TLS in v1.
 FetchContent_Declare(httplib
   GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
-  GIT_TAG v0.20.0
+  GIT_TAG v0.53.1
   GIT_SHALLOW TRUE)
 FetchContent_MakeAvailable(httplib)
 
@@ -56,7 +56,7 @@ FetchContent_MakeAvailable(httplib)
 set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(nlohmann_json
   GIT_REPOSITORY https://github.com/nlohmann/json.git
-  GIT_TAG v3.11.3
+  GIT_TAG v3.12.0
   GIT_SHALLOW TRUE)
 FetchContent_MakeAvailable(nlohmann_json)
 

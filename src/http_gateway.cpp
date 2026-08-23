@@ -1,6 +1,7 @@
 #include "http_gateway.h"
 
 #include <functional>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -121,6 +122,11 @@ grpc::Status run_pipeline(VlmConvertServiceImpl& service,
 
 HttpGateway::HttpGateway(const Config& config, VlmConvertServiceImpl& service)
     : config_(config), service_(service) {
+    // cpp-httplib 0.53 caps request bodies at 100MB by default (0.20 had
+    // no cap). The page caps here are max_page_bytes (configurable up to
+    // 1GB) times the envelope, enforced per page by the pipeline — keep
+    // the transport uncapped so the app-level limits stay authoritative.
+    server_.set_payload_max_length((std::numeric_limits<size_t>::max)());
     server_.Get("/healthz", [](const httplib::Request& /*request*/,
                                httplib::Response& response) {
         response.set_content("ok", "text/plain");

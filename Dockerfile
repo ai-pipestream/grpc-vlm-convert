@@ -18,7 +18,7 @@ COPY . .
 
 # The cache id encodes every ABI-sensitive dependency; bump it when gRPC,
 # cpp-httplib, nlohmann/json, or the toolchain moves.
-RUN --mount=type=cache,id=grpc-vlm-convert-ubuntu24-grpc1.83.0-httplib0.20.0,target=/build \
+RUN --mount=type=cache,id=grpc-vlm-convert-ubuntu24-grpc1.83.0-httplib0.53.1,target=/build \
     cmake -S . -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
         -DGRPC_VLM_WERROR=ON \
     && cmake --build /build --target grpc-vlm-convert-server grpc-vlm-convert-tests --parallel \
