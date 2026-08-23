@@ -142,6 +142,7 @@ install(TARGETS grpc-vlm-convert-server RUNTIME DESTINATION bin)
 if(BUILD_TESTING)
   set(GRPC_VLM_TESTS
     adversarial-test
+    config-test
     doctags-mapper-test
     http-api-test
     markdown-mapper-test

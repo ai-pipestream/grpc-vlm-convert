@@ -343,6 +343,55 @@ void verify_stream_flushes_per_event(httplib::Client& client, FakeVlm& fake) {
     require(saw_doc2, "the held page converts after release");
 }
 
+// Envelope-shape errors from the JSON layer: options must be an object
+// (proto3 JSON), pages must be an array, and an empty envelope reaches
+// the pipeline's own "no pages" rejection.
+void verify_envelope_shapes(httplib::Client& client) {
+    auto result = client.Post("/v1/convert", "{\"options\":5,\"pages\":[]}",
+                              "application/json");
+    require(result && result->status == 400, "non-object options is 400");
+    nlohmann::json body = nlohmann::json::parse(result->body);
+    require(body["error"]["code"] == "INVALID_ARGUMENT", "non-object options names the code");
+    require(body["error"]["message"].get<std::string>().starts_with("options"),
+            "the message points at options");
+
+    result = client.Post("/v1/convert", "{\"pages\":{}}", "application/json");
+    require(result && result->status == 400, "non-array pages is 400");
+    body = nlohmann::json::parse(result->body);
+    require(body["error"]["message"] == "pages must be an array", "the message points at pages");
+
+    // An absent options object becomes an empty-payload first message,
+    // so the pipeline's own first-message rule fires.
+    result = client.Post("/v1/convert", "{}", "application/json");
+    require(result && result->status == 400, "empty envelope is 400");
+    body = nlohmann::json::parse(result->body);
+    require(body["error"]["code"] == "INVALID_ARGUMENT" &&
+                body["error"]["message"].get<std::string>().contains("ConvertOptions"),
+            "empty envelope trips the first-message rule");
+
+    // Options present but no pages reaches the no-pages rejection.
+    result = client.Post("/v1/convert", "{\"options\":{},\"pages\":[]}",
+                         "application/json");
+    require(result && result->status == 400, "pageless request is 400");
+    body = nlohmann::json::parse(result->body);
+    require(body["error"]["message"].get<std::string>().contains("no pages"),
+            "pageless request reaches the pipeline's no-pages rejection");
+}
+
+// cpp-httplib 0.53 introduced a 100MB default request-body cap (0.20 had
+// none); the gateway removes it so the configurable app-level page caps
+// stay authoritative. A body just over 100MB must reach the JSON parser
+// (400 from the handler), never die at the transport (413).
+void verify_transport_uncapped(httplib::Client& client) {
+    client.set_write_timeout(60, 0);
+    const std::string big(100 * 1024 * 1024 + 1, 'x');
+    auto result = client.Post("/v1/convert", big, "application/json");
+    require(result && result->status == 400, "an over-100MB body reaches the handler");
+    const nlohmann::json body = nlohmann::json::parse(result->body);
+    require(body["error"]["code"] == "INVALID_ARGUMENT",
+            "the oversized body fails as JSON, not as a transport cap");
+}
+
 void verify_abort_on_error_sync(httplib::Client& client) {
     vlmv1::ConvertOptions options;
     options.set_abort_on_error(true);
@@ -398,6 +447,8 @@ int main() {
         verify_sync_garbage_json(server.client);
         verify_sync_non_png(server.client);
         verify_stream_flushes_per_event(server.client, fake);
+        verify_envelope_shapes(server.client);
+        verify_transport_uncapped(server.client);
         verify_abort_on_error_sync(server.client);
         verify_abort_on_error_stream(server.client);
 

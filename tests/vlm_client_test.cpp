@@ -29,26 +29,27 @@ struct ScriptableVlm {
     std::atomic<bool> garbage_200{false};
 
     void start() {
-        server.Post("/v1/chat/completions",
-                    [this](const httplib::Request&, httplib::Response& response) {
-                        attempts++;
-                        if (failures_before_success.load() > 0) {
-                            failures_before_success--;
-                            response.status = failure_status.load();
-                            response.set_content("{\"error\":\"model overloaded\"}",
-                                                 "application/json");
-                            return;
-                        }
-                        if (garbage_200.load()) {
-                            response.set_content("not json at all", "text/plain");
-                            return;
-                        }
-                        nlohmann::json reply = {
-                            {"choices",
-                             {{{"message",
-                                {{"role", "assistant"}, {"content", "<doctag/>"}}}}}}};
-                        response.set_content(reply.dump(), "application/json");
-                    });
+        // The same completions handler under a base path: split_endpoint
+        // must post to {prefix}/v1/chat/completions for prefixed endpoints.
+        const auto handler = [this](const httplib::Request&, httplib::Response& response) {
+            attempts++;
+            if (failures_before_success.load() > 0) {
+                failures_before_success--;
+                response.status = failure_status.load();
+                response.set_content("{\"error\":\"model overloaded\"}", "application/json");
+                return;
+            }
+            if (garbage_200.load()) {
+                response.set_content("not json at all", "text/plain");
+                return;
+            }
+            nlohmann::json reply = {
+                {"choices",
+                 {{{"message", {{"role", "assistant"}, {"content", "<doctag/>"}}}}}}};
+            response.set_content(reply.dump(), "application/json");
+        };
+        server.Post("/v1/chat/completions", handler);
+        server.Post("/base/v1/chat/completions", handler);
         port = server.bind_to_any_port("127.0.0.1");
         require(port > 0, "fake VLM bound");
         thread = std::thread([this] { server.listen_after_bind(); });
@@ -80,6 +81,20 @@ int main() {
     ScriptableVlm fake;
     fake.start();
     try {
+        // Endpoint validation: plaintext http only, host required, an
+        // optional path prefix allowed.
+        require(vlm::endpoint_error("http://vlm:8080").empty(), "plain origin validates");
+        require(vlm::endpoint_error("http://vlm:8080/base").empty(), "path prefix validates");
+        require(!vlm::endpoint_error("https://vlm:8080").empty(), "https is rejected");
+        require(!vlm::endpoint_error("http://").empty(), "scheme without a host is rejected");
+        require(!vlm::endpoint_error("vlm:8080").empty(), "missing scheme is rejected");
+
+        // A path-prefixed endpoint posts under the prefix.
+        vlm::VlmResult prefixed = vlm::generate(call_to(fake.endpoint() + "/base"));
+        require(prefixed.ok, "prefixed endpoint resolves: " + prefixed.error);
+        require(prefixed.text == "<doctag/>", "prefixed endpoint answer");
+        fake.attempts = 0;
+
         // Transient failure: 503 once, then 200 — the page succeeds.
         fake.failures_before_success = 1;
         vlm::VlmResult result = vlm::generate(call_to(fake.endpoint()));
