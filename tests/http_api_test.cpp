@@ -8,6 +8,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -61,7 +62,7 @@ std::string base64_decode(const std::string& encoded) {
 // converting.
 struct FakeVlm {
     httplib::Server server;
-    std::thread thread;
+    std::jthread thread;
     int port = 0;
     std::mutex hold_mutex;
     std::condition_variable hold_cv;
@@ -101,7 +102,7 @@ struct FakeVlm {
         });
         port = server.bind_to_any_port("127.0.0.1");
         require(port > 0, "fake VLM bound");
-        thread = std::thread([this] { server.listen_after_bind(); });
+        thread = std::jthread([this] { server.listen_after_bind(); });
         server.wait_until_ready();
     }
 
@@ -275,11 +276,12 @@ struct Ndjson {
 };
 
 // Drives /v1/convert/stream on a thread; content arrives through the
-// receiver as the server flushes each line.
-std::thread post_stream(httplib::Client& client, const nlohmann::json& body,
-                        Ndjson& sink) {
+// receiver as the server flushes each line. jthread so a failed require
+// mid-test unwinds into main's catch instead of aborting in ~thread.
+std::jthread post_stream(httplib::Client& client, const nlohmann::json& body,
+                         Ndjson& sink) {
     const std::string payload = body.dump();  // the thread outlives the caller's json
-    return std::thread([&client, payload, &sink] {
+    return std::jthread([&client, payload, &sink] {
         httplib::Request request;
         request.method = "POST";
         request.path = "/v1/convert/stream";
@@ -297,9 +299,9 @@ std::thread post_stream(httplib::Client& client, const nlohmann::json& body,
     });
 }
 
-bool wait_for(Ndjson& sink, const std::string& needle) {
+bool wait_until(const std::function<bool()>& condition) {
     for (int i = 0; i < 1000; i++) {  // 5s budget, ms-scale in practice
-        if (sink.saw(needle)) {
+        if (condition()) {
             return true;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -307,17 +309,23 @@ bool wait_for(Ndjson& sink, const std::string& needle) {
     return false;
 }
 
+bool wait_for(Ndjson& sink, const std::string& needle) {
+    return wait_until([&] { return sink.saw(needle); });
+}
+
 void verify_stream_flushes_per_event(httplib::Client& client, FakeVlm& fake) {
     vlmv1::ConvertOptions options;
     options.set_concurrency(2);
     Ndjson sink;
-    std::thread worker =
+    std::jthread worker =
         post_stream(client, convert_body(options, {page(1, "PAGE1"), page(2, "HOLD2")}), sink);
 
-    // Page 1's PageDocument must be on the wire while page 2 is still
-    // parked inside the fake VLM — the per-event flush proof.
-    require(wait_for(sink, "\"pageDocument\""), "a PageDocument line arrives without waiting");
-    require(fake.holding.load(), "page 2 is still converting when page 1's line arrived");
+    // Page 2 parks inside the fake VLM until release(), so waiting for the
+    // park first is race-free. Page 1's PageDocument line must then be on
+    // the wire while page 2 is still held — the per-event flush proof.
+    require(wait_until([&] { return fake.holding.load(); }), "page 2 parks in the fake VLM");
+    require(wait_for(sink, "\"pageDocument\""), "a PageDocument line arrives while page 2 is held");
+    require(fake.holding.load(), "page 2 is still parked when page 1's line arrived");
     for (const std::string& line : sink.lines()) {
         require(nlohmann::json::parse(line, nullptr, false).is_object(),
                 "every NDJSON line is a JSON object");
@@ -418,7 +426,7 @@ void verify_abort_on_error_stream(httplib::Client& client) {
     options.set_abort_on_error(true);
     options.set_concurrency(2);
     Ndjson sink;
-    std::thread worker =
+    std::jthread worker =
         post_stream(client, convert_body(options, {page(1, "PAGE1"), page(2, "FAIL2")}), sink);
     worker.join();
     require(wait_for(sink, "\"error\""), "the error line arrives");
