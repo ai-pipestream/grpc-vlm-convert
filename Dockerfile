@@ -7,7 +7,7 @@
 # gate the image. The golden test needs a live VLM endpoint and skips
 # cleanly (exit 77) in the image build.
 
-FROM ubuntu:24.04 AS build
+FROM ubuntu:26.04 AS build
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates cmake g++ git make ninja-build pkg-config \
@@ -17,15 +17,18 @@ WORKDIR /src
 COPY . .
 
 # The cache id encodes every ABI-sensitive dependency; bump it when gRPC,
-# cpp-httplib, nlohmann/json, or the toolchain moves.
-RUN --mount=type=cache,id=grpc-vlm-convert-ubuntu24-grpc1.83.0-httplib0.53.1,target=/build \
+# cpp-httplib, nlohmann/json, the C++ standard, or the toolchain moves.
+# TARGETARCH keys the cache per platform: multi-arch legs otherwise share
+# one mount id and poison each other's object files.
+ARG TARGETARCH
+RUN --mount=type=cache,id=grpc-vlm-convert-ubuntu26-cxx23-grpc1.83.0-httplib0.53.1-${TARGETARCH},target=/build \
     cmake -S . -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
         -DGRPC_VLM_WERROR=ON \
     && cmake --build /build --target grpc-vlm-convert-server grpc-vlm-convert-tests --parallel \
     && ctest --test-dir /build -L vlm --output-on-failure \
     && mkdir -p /out && cp /build/grpc-vlm-convert-server /out/
 
-FROM ubuntu:24.04
+FROM ubuntu:26.04
 
 COPY --from=build /out/grpc-vlm-convert-server /usr/local/bin/grpc-vlm-convert-server
 

@@ -3,7 +3,8 @@ project(grpc-vlm-convert VERSION 0.1.0 LANGUAGES C CXX)
 
 include(CTest)
 
-set(CMAKE_CXX_STANDARD 17)
+# C++23: the newest published standard with complete GCC 15 support.
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
