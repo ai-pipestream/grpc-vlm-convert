@@ -5,9 +5,10 @@
 #include <chrono>
 #include <condition_variable>
 #include <csignal>
-#include <iostream>
+#include <cstdio>
 #include <memory>
 #include <mutex>
+#include <print>
 #include <thread>
 
 #include <grpcpp/ext/proto_server_reflection_plugin.h>
@@ -44,6 +45,10 @@ void install_shutdown_pipe() {
 }  // namespace
 
 int main() {
+    // Container stdout is a pipe (fully buffered by default), and
+    // std::println does not flush the way std::endl did; line-buffer
+    // stdout so every log line leaves the process as it is written.
+    std::setvbuf(stdout, nullptr, _IOLBF, 0);
     try {
         install_shutdown_pipe();
 
@@ -58,7 +63,7 @@ int main() {
         builder.RegisterService(&service);
         std::unique_ptr<grpc::Server> server = builder.BuildAndStart();
         if (server == nullptr) {
-            std::cerr << "Unable to listen on " << config.listen_address << '\n';
+            std::println(stderr, "Unable to listen on {}", config.listen_address);
             return 1;
         }
 
@@ -67,7 +72,7 @@ int main() {
         vlm::HttpGateway http_gateway(config, service);
         if (config.http_port != 0 &&
             !http_gateway.start("0.0.0.0", static_cast<int>(config.http_port))) {
-            std::cerr << "Unable to listen on 0.0.0.0:" << config.http_port << " (HTTP)\n";
+            std::println(stderr, "Unable to listen on 0.0.0.0:{} (HTTP)", config.http_port);
             return 1;
         }
 
@@ -89,23 +94,21 @@ int main() {
                 while (!metrics_stop.wait_for(
                     lock, std::chrono::seconds(config.metrics_interval_seconds),
                     [&] { return stopping; })) {
-                    std::cout << "grpc-vlm-convert metrics: streams{converted="
-                              << service.converted.load() << ",rejected=" << service.rejected.load()
-                              << ",failed=" << service.failed.load() << "} pages{ok="
-                              << service.pages_ok.load() << ",failed=" << service.pages_failed.load()
-                              << "}" << std::endl;
+                    std::println("grpc-vlm-convert metrics: streams{{converted={},rejected={},"
+                                 "failed={}}} pages{{ok={},failed={}}}",
+                                 service.converted.load(), service.rejected.load(),
+                                 service.failed.load(), service.pages_ok.load(),
+                                 service.pages_failed.load());
                 }
             });
         }
 
-        std::cout << "grpc-vlm-convert listening on " << config.listen_address
-                  << (config.http_port != 0
-                          ? " (HTTP on 0.0.0.0:" + std::to_string(config.http_port) + ")"
-                          : "")
-                  << " (endpoint "
-                  << (config.endpoint.empty() ? "<none — per-request override required>"
-                                              : config.endpoint)
-                  << ")" << std::endl;
+        std::println("grpc-vlm-convert listening on {}{} (endpoint {})", config.listen_address,
+                     config.http_port != 0
+                         ? " (HTTP on 0.0.0.0:" + std::to_string(config.http_port) + ")"
+                         : "",
+                     config.endpoint.empty() ? "<none — per-request override required>"
+                                             : config.endpoint);
         server->Wait();
 
         http_gateway.stop();
@@ -123,7 +126,7 @@ int main() {
         }
         return 0;
     } catch (const std::exception& error) {
-        std::cerr << "Startup failed: " << error.what() << '\n';
+        std::println(stderr, "Startup failed: {}", error.what());
         return 1;
     }
 }

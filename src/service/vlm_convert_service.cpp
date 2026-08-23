@@ -4,6 +4,7 @@
 #include <condition_variable>
 #include <deque>
 #include <mutex>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -59,8 +60,8 @@ class Channel {
 
 // PNG signature: 8 bytes, 89 50 4E 47 0D 0A 1A 0A.
 bool is_png(const std::string& bytes) {
-    static const char kMagic[8] = {'\x89', 'P', 'N', 'G', '\x0d', '\x0a', '\x1a', '\x0a'};
-    return bytes.size() >= sizeof(kMagic) && bytes.compare(0, sizeof(kMagic), kMagic, 8) == 0;
+    static constexpr char kMagic[8] = {'\x89', 'P', 'N', 'G', '\x0d', '\x0a', '\x1a', '\x0a'};
+    return bytes.starts_with(std::string_view(kMagic, sizeof(kMagic)));
 }
 
 // One page through the model queue: the image plus everything the worker
@@ -254,17 +255,18 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
         event.mutable_page_started()->set_page_no(image.page_no());
         events.push(std::move(event));
 
-        PageJob job;
-        job.image = image;
-        job.call.endpoint = endpoint;
-        job.call.model = model;
-        job.call.prompt = prompt;
-        job.call.stop = stop;
-        job.call.max_tokens = max_tokens;
-        job.call.timeout_seconds = static_cast<long>(config_.vlm_timeout_seconds);
-        job.format = format;
-        job.model = model;
-        jobs.push(std::move(job));
+        jobs.push(PageJob{
+            .image = image,
+            .call = {.endpoint = endpoint,
+                     .model = model,
+                     .prompt = prompt,
+                     .stop = stop,
+                     .max_tokens = max_tokens,
+                     .png = {},
+                     .timeout_seconds = static_cast<long>(config_.vlm_timeout_seconds)},
+            .format = format,
+            .model = model,
+        });
     }
     jobs.close();
     for (std::thread& worker : workers) {

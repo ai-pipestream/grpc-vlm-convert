@@ -111,9 +111,9 @@ int main() {
         verify_srow_section_row();
         verify_failures();
     } catch (const std::exception& error) {
-        std::cerr << error.what() << '\n';
+        std::println(stderr, "{}", error.what());
         return 1;
     }
-    std::cout << "otsl-mapper-test passed\n";
+    std::println("otsl-mapper-test passed");
     return 0;
 }

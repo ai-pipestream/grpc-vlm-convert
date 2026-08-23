@@ -5,7 +5,7 @@
 
 #include <cstdio>
 #include <cstdlib>
-#include <iostream>
+#include <print>
 #include <stdexcept>
 #include <string>
 
@@ -31,6 +31,6 @@ inline const char* env_or_null(const char* name) {
 
 // Standard skip: exit 77 so CTest reports SKIP, not PASS.
 inline int skip(const std::string& why) {
-    std::cerr << "SKIP: " << why << '\n';
+    std::println(stderr, "SKIP: {}", why);
     return 77;
 }

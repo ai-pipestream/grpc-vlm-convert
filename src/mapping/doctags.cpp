@@ -66,10 +66,6 @@ int32_t char_length(const std::string& text) {
     return count;
 }
 
-bool starts_with(const std::string& text, const std::string& prefix) {
-    return text.compare(0, prefix.size(), prefix) == 0;
-}
-
 bool is_container(const std::string& tag) {
     return tag == "picture" || tag == "chart" || tag == "table" || tag == "otsl";
 }
@@ -153,7 +149,7 @@ std::string clean_cell_text(const std::string& content) {
             break;
         }
         const std::string token = content.substr(open + 1, gt - open - 1);
-        if (starts_with(token, "loc_") || starts_with(token, "link_")) {
+        if (token.starts_with("loc_") || token.starts_with("link_")) {
             out += content.substr(pos, open - pos);
         } else {
             out += content.substr(pos, gt - pos + 1);
@@ -234,19 +230,15 @@ const std::vector<std::pair<const char*, const char*>> kClassificationLabels = {
 };
 
 bool is_classification_tag(const std::string& token) {
-    for (const auto& [tag, mapped] : kClassificationLabels) {
-        if (token == tag) {
-            return true;
-        }
-    }
-    return false;
+    return std::ranges::any_of(kClassificationLabels,
+                               [&](const auto& label) { return token == label.first; });
 }
 
 // Docling scans the chunk for each label in list order and keeps the
 // first hit; encounter order in the token stream does not matter.
 std::string pick_classification(const std::vector<std::string>& seen) {
     for (const auto& [tag, mapped] : kClassificationLabels) {
-        if (std::find(seen.begin(), seen.end(), tag) != seen.end()) {
+        if (std::ranges::contains(seen, tag)) {
             return mapped;
         }
     }
@@ -318,12 +310,9 @@ docv1::CodeLanguageLabel code_language_of(const std::string& raw) {
         {"XML", docv1::CODE_LANGUAGE_LABEL_XML},
         {"YAML", docv1::CODE_LANGUAGE_LABEL_YAML},
     };
-    for (const auto& [value, label] : kLanguages) {
-        if (raw == value) {
-            return label;
-        }
-    }
-    return docv1::CODE_LANGUAGE_LABEL_UNKNOWN;
+    const auto match = std::ranges::find_if(
+        kLanguages, [&](const auto& language) { return raw == language.first; });
+    return match != kLanguages.end() ? match->second : docv1::CODE_LANGUAGE_LABEL_UNKNOWN;
 }
 
 // Adds the element's embedded caption as a CAPTION text item and returns
@@ -419,7 +408,7 @@ bool emit_element(const Element& element, const PageContext& page, docv1::Docume
     if (tag == "title") {
         add_title(doc, page, prov, text);
         index = doc->texts_size() - 1;
-    } else if (starts_with(tag, "section_header_level_")) {
+    } else if (tag.starts_with("section_header_level_")) {
         int level = 1;
         try {
             level = std::max(1, std::stoi(tag.substr(21)));
@@ -427,7 +416,7 @@ bool emit_element(const Element& element, const PageContext& page, docv1::Docume
         }
         add_section_header(doc, page, level, prov, text);
         index = doc->texts_size() - 1;
-    } else if (starts_with(tag, "subtitle-level_")) {
+    } else if (tag.starts_with("subtitle-level_")) {
         add_section_header(doc, page, 1, prov, text);
         index = doc->texts_size() - 1;
     } else if (tag == "list_item") {
@@ -440,9 +429,8 @@ bool emit_element(const Element& element, const PageContext& page, docv1::Docume
         std::string body = text;
         docv1::CodeLanguageLabel language = docv1::CODE_LANGUAGE_LABEL_UNKNOWN;
         std::string language_raw;
-        if (starts_with(body, "<_")) {
-            const size_t end = body.find("_>", 2);
-            if (end != std::string::npos) {
+        if (body.starts_with("<_")) {
+            if (const size_t end = body.find("_>", 2); end != std::string::npos) {
                 language_raw = body.substr(2, end - 2);
                 language = code_language_of(language_raw);
                 body = body.substr(end + 2);
@@ -595,7 +583,7 @@ bool emit_key_value_region(const std::string& chunk, const PageContext& page,
     }
     for (const auto& [source, target] : raw_links) {
         // Docling validates the prediction: links to missing cells drop.
-        if (std::find(cell_ids.begin(), cell_ids.end(), target) == cell_ids.end()) {
+        if (!std::ranges::contains(cell_ids, target)) {
             continue;
         }
         docv1::GraphLink* link = graph->add_links();
@@ -696,7 +684,7 @@ bool emit_inline_group(const std::string& chunk, const PageContext& page,
         const std::string token = content.substr(open + 1, gt - open - 1);
         pos = gt + 1;
         if (token.empty() || token[0] == '/' || token[0] == '_' ||
-            starts_with(token, "loc_")) {
+            token.starts_with("loc_")) {
             continue;
         }
         const std::string close_tag = "</" + token + ">";
@@ -739,7 +727,7 @@ bool emit_inline_group(const std::string& chunk, const PageContext& page,
 
 bool map_doctags(const std::string& text, const PageContext& page, docv1::Document* out,
                  std::string* error) {
-    if (text.find('<') == std::string::npos) {
+    if (!text.contains('<')) {
         *error = "response holds no DocTags markup";
         return false;
     }
@@ -802,7 +790,7 @@ bool map_doctags(const std::string& text, const PageContext& page, docv1::Docume
         std::string token = text.substr(open + 1, close - open - 1);
         pos = close + 1;
 
-        if (starts_with(token, "loc_")) {
+        if (token.starts_with("loc_")) {
             try {
                 (in_caption ? current.caption_locs
                             : element_open ? current.locs : pending_locs)

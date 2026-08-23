@@ -1,5 +1,7 @@
 #include "presets.h"
 
+#include <algorithm>
+
 namespace vlm {
 
 namespace {
@@ -35,21 +37,13 @@ const std::vector<PresetSpec>& all_presets() {
 }
 
 const PresetSpec* find_preset(vlmv1::VlmPreset preset) {
-    for (const PresetSpec& spec : kPresets) {
-        if (spec.preset == preset) {
-            return &spec;
-        }
-    }
-    return nullptr;
+    const auto spec = std::ranges::find(kPresets, preset, &PresetSpec::preset);
+    return spec != kPresets.end() ? &*spec : nullptr;
 }
 
 const PresetSpec* find_preset_by_name(const std::string& name) {
-    for (const PresetSpec& spec : kPresets) {
-        if (name == spec.name) {
-            return &spec;
-        }
-    }
-    return nullptr;
+    const auto spec = std::ranges::find(kPresets, name, &PresetSpec::name);
+    return spec != kPresets.end() ? &*spec : nullptr;
 }
 
 bool resolve_request(const vlmv1::ConvertOptions& options, std::string* model,

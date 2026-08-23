@@ -96,6 +96,6 @@ int main() {
     require(complete.pages_ok() == 1 && complete.pages_failed() == 0,
             "trailer counts the one page");
     server->Shutdown();
-    std::cout << "vlm-golden-test passed\n";
+    std::println("vlm-golden-test passed");
     return 0;
 }

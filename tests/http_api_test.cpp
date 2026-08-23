@@ -74,16 +74,16 @@ struct FakeVlm {
             nlohmann::json body = nlohmann::json::parse(request.body, nullptr, false);
             std::string url = body["messages"][0]["content"][1]["image_url"]["url"];
             const std::string prefix = "data:image/png;base64,";
-            require(url.compare(0, prefix.size(), prefix) == 0, "image arrives as a data URL");
+            require(url.starts_with(prefix), "image arrives as a data URL");
             const std::string png = base64_decode(url.substr(prefix.size()));
 
-            if (png.find("HOLD") != std::string::npos) {
+            if (png.contains("HOLD")) {
                 holding = true;
                 std::unique_lock<std::mutex> lock(hold_mutex);
                 hold_cv.wait(lock, [&] { return hold_released; });
                 holding = false;
             }
-            if (png.find("FAIL") != std::string::npos) {
+            if (png.contains("FAIL")) {
                 response.status = 503;
                 response.set_content("{\"error\":\"model overloaded\"}", "application/json");
                 return;
@@ -240,7 +240,7 @@ void verify_sync_non_png(httplib::Client& client) {
     require(result && result->status == 400, "non-PNG page is 400");
     const nlohmann::json body = nlohmann::json::parse(result->body);
     require(body["error"]["code"] == "INVALID_ARGUMENT", "non-PNG names INVALID_ARGUMENT");
-    require(body["error"]["message"].get<std::string>().find("PNG") != std::string::npos,
+    require(body["error"]["message"].get<std::string>().contains("PNG"),
             "the message says why");
 }
 
@@ -270,7 +270,7 @@ struct Ndjson {
 
     bool saw(const std::string& needle) {
         std::lock_guard<std::mutex> lock(mutex);
-        return buffer.find(needle) != std::string::npos;
+        return buffer.contains(needle);
     }
 };
 
@@ -403,11 +403,11 @@ int main() {
 
         server.stop();
     } catch (const std::exception& error) {
-        std::cerr << error.what() << '\n';
+        std::println(stderr, "{}", error.what());
         fake.stop();
         return 1;
     }
     fake.stop();
-    std::cout << "http-api-test passed\n";
+    std::println("http-api-test passed");
     return 0;
 }

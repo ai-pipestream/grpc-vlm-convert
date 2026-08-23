@@ -42,8 +42,8 @@ bool map_html(const std::string& text, const PageContext& page, docv1::Document*
     auto end = std::sregex_iterator();
     for (auto it = begin; it != end; ++it) {
         std::string tag = (*it)[1].str();
-        std::transform(tag.begin(), tag.end(), tag.begin(),
-                       [](unsigned char c) { return std::tolower(c); });
+        std::ranges::transform(tag, tag.begin(),
+                               [](unsigned char c) { return std::tolower(c); });
         const std::string body = strip_tags((*it)[2].str());
         if (body.empty() && tag != "table") {
             continue;

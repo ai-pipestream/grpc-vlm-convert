@@ -55,8 +55,7 @@ std::string base64_encode(const std::string& bytes) {
 // the path prefix requests go under.
 bool split_endpoint(const std::string& endpoint, std::string* origin, std::string* path) {
     const std::string scheme = "http://";
-    if (endpoint.compare(0, scheme.size(), scheme) != 0 ||
-        endpoint.size() == scheme.size()) {
+    if (!endpoint.starts_with(scheme) || endpoint.size() == scheme.size()) {
         return false;
     }
     size_t slash = endpoint.find('/', scheme.size());
@@ -67,7 +66,7 @@ bool split_endpoint(const std::string& endpoint, std::string* origin, std::strin
         *origin = endpoint.substr(0, slash);
         *path = endpoint.substr(slash);
         // Trailing slashes would produce "//v1/chat/completions".
-        while (!path->empty() && path->back() == '/') {
+        while (path->ends_with('/')) {
             path->pop_back();
         }
     }
@@ -180,8 +179,8 @@ VlmResult generate(const VlmCall& call) {
                 if (!token.is_object()) {
                     continue;
                 }
-                const auto logprob = token.find("logprob");
-                if (logprob != token.end() && logprob->is_number()) {
+                if (const auto logprob = token.find("logprob");
+                    logprob != token.end() && logprob->is_number()) {
                     sum += logprob->get<double>();
                     count++;
                 }

@@ -182,9 +182,8 @@ bool map_otsl(const std::string& text, const PageContext& page, docv1::Document*
               std::string* error) {
     // The OTSL payload may arrive wrapped in <otsl>...</otsl> or bare.
     std::string body = text;
-    size_t open = text.find("<otsl>");
-    if (open != std::string::npos) {
-        size_t close = text.find("</otsl>", open);
+    if (const size_t open = text.find("<otsl>"); open != std::string::npos) {
+        const size_t close = text.find("</otsl>", open);
         body = close == std::string::npos
                    ? text.substr(open + 6)
                    : text.substr(open + 6, close - open - 6);

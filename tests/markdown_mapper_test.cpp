@@ -139,9 +139,9 @@ int main() {
         verify_mapping_failure();
         verify_plaintext_and_html();
     } catch (const std::exception& error) {
-        std::cerr << error.what() << '\n';
+        std::println(stderr, "{}", error.what());
         return 1;
     }
-    std::cout << "markdown-mapper-test passed\n";
+    std::println("markdown-mapper-test passed");
     return 0;
 }

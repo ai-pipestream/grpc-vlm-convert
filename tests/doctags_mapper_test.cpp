@@ -356,7 +356,7 @@ void verify_picture_crop() {
     require(cropped.image().mimetype() == "image/png", "crop mimetype");
     require(cropped.image().size().width() == 50 && cropped.image().size().height() == 25,
             "crop scales the box into raster pixels");
-    require(cropped.image().uri().compare(0, 22, "data:image/png;base64,") == 0,
+    require(cropped.image().uri().starts_with("data:image/png;base64,"),
             "crop is a PNG data URI");
     // No locs → no crop, but the PictureItem still lands.
     require(!doc.pictures(1).has_image(), "no box, no crop, picture still emitted");
@@ -551,9 +551,9 @@ int main() {
         verify_list_groups();
         verify_inline_group();
     } catch (const std::exception& error) {
-        std::cerr << error.what() << '\n';
+        std::println(stderr, "{}", error.what());
         return 1;
     }
-    std::cout << "doctags-mapper-test passed\n";
+    std::println("doctags-mapper-test passed");
     return 0;
 }

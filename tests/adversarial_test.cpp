@@ -343,7 +343,7 @@ void verify_image_crop_adversarial() {
             "grayscale PNG crops");
     require(image.size().width() == 2 && image.size().height() == 2, "grayscale crop size");
     require(image.mimetype() == "image/png" &&
-                image.uri().compare(0, 22, "data:image/png;base64,") == 0,
+                image.uri().starts_with("data:image/png;base64,"),
             "grayscale crop re-encodes as a PNG data URI");
     require(vlm::mapping::crop_png_image(base64_decode(kPalette2x2), 0, 0, 2, 2, 2, 2, &image),
             "palette PNG crops");
@@ -527,13 +527,13 @@ struct ScriptVlm {
 };
 
 vlm::VlmCall call_to(const std::string& endpoint) {
-    vlm::VlmCall call;
-    call.endpoint = endpoint;
-    call.model = "test-model";
-    call.prompt = "prompt";
-    call.png = "fake-png-bytes";
-    call.timeout_seconds = 5;
-    return call;
+    return {.endpoint = endpoint,
+            .model = "test-model",
+            .prompt = "prompt",
+            .stop = {},
+            .max_tokens = 4096,
+            .png = "fake-png-bytes",
+            .timeout_seconds = 5};
 }
 
 std::string completion(const std::string& content_json, const std::string& extra = "") {
@@ -664,12 +664,12 @@ struct FakeVlm {
             nlohmann::json body = nlohmann::json::parse(request.body, nullptr, false);
             std::string url = body["messages"][0]["content"][1]["image_url"]["url"];
             const std::string png = base64_decode(url.substr(22));
-            if (png.find("FAIL") != std::string::npos) {
+            if (png.contains("FAIL")) {
                 response.status = 503;
                 response.set_content("{\"error\":\"model overloaded\"}", "application/json");
                 return;
             }
-            if (png.find("SLOW") != std::string::npos) {
+            if (png.contains("SLOW")) {
                 std::this_thread::sleep_for(std::chrono::seconds(2));
             }
             nlohmann::json reply = {
@@ -862,7 +862,7 @@ int main() {
         try {
             verify();
         } catch (const std::exception& error) {
-            std::cerr << name << ": " << error.what() << '\n';
+            std::println(stderr, "{}: {}", name, error.what());
             failures++;
         }
     };
@@ -882,9 +882,9 @@ int main() {
     script_vlm.stop();
     fake.stop();
     if (failures > 0) {
-        std::cerr << failures << " adversarial group(s) failed\n";
+        std::println(stderr, "{} adversarial group(s) failed", failures);
         return 1;
     }
-    std::cout << "adversarial-test passed\n";
+    std::println("adversarial-test passed");
     return 0;
 }

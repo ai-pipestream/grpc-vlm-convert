@@ -64,13 +64,13 @@ struct ScriptableVlm {
 };
 
 vlm::VlmCall call_to(const std::string& endpoint) {
-    vlm::VlmCall call;
-    call.endpoint = endpoint;
-    call.model = "test-model";
-    call.prompt = "prompt";
-    call.png = "fake-png-bytes";
-    call.timeout_seconds = 5;
-    return call;
+    return {.endpoint = endpoint,
+            .model = "test-model",
+            .prompt = "prompt",
+            .stop = {},
+            .max_tokens = 4096,
+            .png = "fake-png-bytes",
+            .timeout_seconds = 5};
 }
 
 }  // namespace
@@ -92,7 +92,7 @@ int main() {
         fake.failures_before_success = 100;
         vlm::VlmResult failed = vlm::generate(call_to(fake.endpoint()));
         require(!failed.ok, "persistent 503 fails the call");
-        require(failed.error.find("503") != std::string::npos, "the error names HTTP 503");
+        require(failed.error.contains("503"), "the error names HTTP 503");
         require(fake.attempts > 1, "persistent 503 is retried");
         require(fake.attempts == 6, "1 initial attempt + 5 retries");
 
@@ -120,7 +120,7 @@ int main() {
         fake.garbage_200 = true;
         failed = vlm::generate(call_to(fake.endpoint()));
         require(!failed.ok, "unparseable 200 fails");
-        require(failed.error.find("non-JSON") != std::string::npos, "names the parse failure");
+        require(failed.error.contains("non-JSON"), "names the parse failure");
         require(fake.attempts == 1, "unparseable 200 is not retried");
         fake.garbage_200 = false;
 
@@ -128,14 +128,14 @@ int main() {
         // retried, then surfaces as unreachable.
         failed = vlm::generate(call_to("http://127.0.0.1:1"));
         require(!failed.ok, "connection refused fails");
-        require(failed.error.find("unreachable") != std::string::npos,
+        require(failed.error.contains("unreachable"),
                 "connection failure surfaces as unreachable");
     } catch (const std::exception& error) {
-        std::cerr << error.what() << '\n';
+        std::println(stderr, "{}", error.what());
         fake.stop();
         return 1;
     }
     fake.stop();
-    std::cout << "vlm-client-test passed\n";
+    std::println("vlm-client-test passed");
     return 0;
 }

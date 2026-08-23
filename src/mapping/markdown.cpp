@@ -23,7 +23,7 @@ bool is_separator_row(const std::string& line) {
 
 std::vector<std::string> split_pipe_row(const std::string& line) {
     std::string row = trim(line);
-    if (!row.empty() && row.front() == '|') {
+    if (row.starts_with('|')) {
         row.erase(0, 1);
     }
     // Split on unescaped pipes only: "\|" is cell content (a literal
@@ -115,7 +115,7 @@ bool map_markdown(const std::string& text, const PageContext& page, docv1::Docum
             nl = text.size();
         }
         std::string line = text.substr(start, nl - start);
-        if (!line.empty() && line.back() == '\r') {
+        if (line.ends_with('\r')) {
             line.pop_back();
         }
         lines.push_back(std::move(line));
@@ -138,11 +138,11 @@ bool map_markdown(const std::string& text, const PageContext& page, docv1::Docum
         std::string stripped = trim(line);
 
         // Fenced code block.
-        if (stripped.compare(0, 3, "```") == 0) {
+        if (stripped.starts_with("```")) {
             flush_paragraph();
             std::string language = trim(stripped.substr(3));
             std::string code;
-            while (++i < lines.size() && trim(lines[i]).compare(0, 3, "```") != 0) {
+            while (++i < lines.size() && !trim(lines[i]).starts_with("```")) {
                 code += lines[i];
                 code += '\n';
             }
@@ -176,11 +176,10 @@ bool map_markdown(const std::string& text, const PageContext& page, docv1::Docum
         }
 
         // Pipe table: a run of lines starting with '|'.
-        if (!stripped.empty() && stripped.front() == '|') {
+        if (stripped.starts_with('|')) {
             flush_paragraph();
             std::vector<std::string> table_lines;
-            while (i < lines.size() && !trim(lines[i]).empty() &&
-                   trim(lines[i]).front() == '|') {
+            while (i < lines.size() && trim(lines[i]).starts_with('|')) {
                 table_lines.push_back(lines[i]);
                 i++;
             }

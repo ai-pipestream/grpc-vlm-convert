@@ -84,18 +84,18 @@ struct FakeVlm {
             }
             std::string url = body["messages"][0]["content"][1]["image_url"]["url"];
             const std::string prefix = "data:image/png;base64,";
-            require(url.compare(0, prefix.size(), prefix) == 0, "image arrives as a data URL");
+            require(url.starts_with(prefix), "image arrives as a data URL");
             const std::string png = base64_decode(url.substr(prefix.size()));
 
-            if (png.find("FAIL") != std::string::npos) {
+            if (png.contains("FAIL")) {
                 response.status = 503;
                 response.set_content("{\"error\":\"model overloaded\"}", "application/json");
                 return;
             }
             std::string content;
-            if (png.find("MDPAGE") != std::string::npos) {
+            if (png.contains("MDPAGE")) {
                 content = "# Converted Page\n\nA markdown paragraph.\n";
-            } else if (png.find("RAWTEXT") != std::string::npos) {
+            } else if (png.contains("RAWTEXT")) {
                 content = "just plain words with no markup";
             } else {
                 content =
@@ -260,7 +260,7 @@ void verify_streaming_and_failure_isolation(const std::shared_ptr<grpc::Channel>
     require(out.raws.size() == 1, "page 2 reports a failure event");
     require(out.raws[0].page_no() == 2, "the failed event is page 2");
     require(!out.raws[0].error().empty(), "the failure event carries the endpoint error");
-    require(out.raws[0].error().find("503") != std::string::npos, "the error names HTTP 503");
+    require(out.raws[0].error().contains("503"), "the error names HTTP 503");
     for (const vlmv1::PageDocument& document : out.documents) {
         require(document.page_no() == 1 || document.page_no() == 3, "converted pages are 1, 3");
         require(document.document().texts_size() == 2, "canned DocTags maps to two items");
@@ -302,7 +302,7 @@ void verify_markdown_and_raw_fallback(const std::shared_ptr<grpc::Channel>& chan
     Collected raw = convert(channel, doctags, {page(1, "RAWTEXT1")});
     require(raw.status.ok(), "mapping failure is not a stream failure");
     require(raw.documents.empty() && raw.raws.size() == 1, "PageRaw fallback");
-    require(raw.raws[0].text().find("plain words") != std::string::npos,
+    require(raw.raws[0].text().contains("plain words"),
             "PageRaw keeps the model text");
     require(!raw.raws[0].error().empty(), "PageRaw names the mapping failure");
     require(raw.complete.pages_failed() == 1, "trailer counts the failed page");
@@ -495,11 +495,11 @@ int main() {
                 "page counters moved");
         server.stop();
     } catch (const std::exception& error) {
-        std::cerr << error.what() << '\n';
+        std::println(stderr, "{}", error.what());
         fake.stop();
         return 1;
     }
     fake.stop();
-    std::cout << "vlm-convert-service-test passed\n";
+    std::println("vlm-convert-service-test passed");
     return 0;
 }
