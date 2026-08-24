@@ -53,6 +53,8 @@ void verify_heading_paragraph_boxes() {
     require(doc.body().children_size() == 2, "body lists the items");
     require(doc.body().children(0).ref() == "#/texts/0", "child refs in order");
     require(doc.pages().at(1).size().width() == 1000, "pages entry carries raster size");
+    require(doc.schema_name() == "docling_document_v2", "root schema name stamped");
+    require(doc.version() == "1.10.0", "root schema version stamped");
 }
 
 void verify_table_picture_furniture() {

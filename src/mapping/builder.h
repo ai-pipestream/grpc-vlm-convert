@@ -229,6 +229,10 @@ inline std::string body_child_ref(BodyChild::Kind kind, int index) {
 // pages map entry with the raster size.
 inline void finalize_document(docv1::Document* doc, const PageContext& page,
                               const std::vector<BodyChild>& order) {
+    // Root schema identity: the wire schema name and minor every producer
+    // in the fleet stamps on a finished Document.
+    doc->set_schema_name("docling_document_v2");
+    doc->set_version("1.10.0");
     doc->set_name("page-" + std::to_string(page.page_no));
     docv1::GroupItem* body = doc->mutable_body();
     body->set_self_ref("#/body");
