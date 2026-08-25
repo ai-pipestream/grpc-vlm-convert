@@ -106,6 +106,13 @@ struct FakeVlm {
                     "<text><loc_50><loc_200><loc_400><loc_260>Fake body text.</text>"
                     "</doctag>";
             }
+            // Alternates come back only when the request asked for them,
+            // so a fragment carrying them proves the key reached the wire.
+            nlohmann::json alternates = nlohmann::json::array();
+            if (body.is_object() && body.contains("top_logprobs")) {
+                alternates = {{{"token", "a"}, {"logprob", -0.1}},
+                              {{"token", "e"}, {"logprob", -3.0}}};
+            }
             nlohmann::json reply = {
                 {"model", "served-granite"},
                 {"usage", {{"prompt_tokens", 1200}, {"completion_tokens", 512}}},
@@ -114,7 +121,7 @@ struct FakeVlm {
                    {"finish_reason", "length"},
                    {"logprobs",
                     {{"content",
-                      {{{"token", "a"}, {"logprob", -0.1}},
+                      {{{"token", "a"}, {"logprob", -0.1}, {"top_logprobs", alternates}},
                        {{"token", "b"}, {"logprob", -0.2}}}}}}}}},
             };
             response.set_content(reply.dump(), "application/json");
@@ -370,6 +377,53 @@ void verify_stop_and_max_tokens(const std::shared_ptr<grpc::Channel>& channel, F
     require(!body.contains("stop"), "presets without stop strings omit the parameter");
 }
 
+// Alternate readings: one JSON key out, hypotheses back on the fragment's
+// body group. Nothing asks for them by default, and nothing carries them
+// when nothing asked.
+void verify_alternatives(const std::shared_ptr<grpc::Channel>& channel, FakeVlm* fake) {
+    vlmv1::ConvertOptions silent;
+    Collected out = convert(channel, silent, {page(1, "PAGE1")});
+    require(out.status.ok(), "default page OK: " + out.status.error_message());
+    require(!fake->last_request().contains("top_logprobs"),
+            "no alternates are asked for by default");
+    require(!out.documents[0].document().body().meta().has_alternatives(),
+            "a page nobody asked alternates for carries none");
+
+    vlmv1::ConvertOptions nbest;
+    nbest.set_top_logprobs(2);
+    out = convert(channel, nbest, {page(1, "PAGE1")});
+    require(out.status.ok(), "n-best page OK: " + out.status.error_message());
+    require(fake->last_request()["top_logprobs"] == 2, "top_logprobs reaches the wire");
+    const auto& alternatives = out.documents[0].document().body().meta().alternatives();
+    require(alternatives.hypotheses_size() == 2, "both alternates ride the fragment");
+    require(alternatives.created_by() == "served-granite",
+            "the alternates name the model that offered them");
+    require(alternatives.hypotheses(0).text() == "a" &&
+                alternatives.hypotheses(1).text() == "e",
+            "alternates keep generation order");
+    require(alternatives.hypotheses(1).raw_score_kind() == "token_logprob" &&
+                std::fabs(alternatives.hypotheses(1).raw_score() + 3.0) < 1e-9,
+            "an alternate carries its unrescaled score with the kind named");
+    require(!alternatives.hypotheses(0).has_range(),
+            "no range is claimed: nothing maps a token back to an item");
+    // Page-scoped data stays on the page container, off the items.
+    require(!out.documents[0]
+                 .document()
+                 .texts(0)
+                 .section_header()
+                 .base()
+                 .meta()
+                 .has_alternatives(),
+            "items do not each claim the page's alternates");
+
+    // Above the endpoint ceiling the RPC fails before a page is paid for.
+    vlmv1::ConvertOptions too_many;
+    too_many.set_top_logprobs(21);
+    out = convert(channel, too_many, {page(1, "PAGE1")});
+    require(out.status.error_code() == grpc::StatusCode::INVALID_ARGUMENT,
+            "top_logprobs above 20 is INVALID_ARGUMENT");
+}
+
 void verify_abort_on_error(const std::shared_ptr<grpc::Channel>& channel) {    vlmv1::ConvertOptions options;
     options.set_abort_on_error(true);
     Collected out = convert(channel, options, {page(1, "PAGE1"), page(2, "FAIL2")});
@@ -513,6 +567,7 @@ int main() {
                 "the persistently-503 page was retried: more calls than pages");
         verify_markdown_and_raw_fallback(server.channel);
         verify_stop_and_max_tokens(server.channel, &fake);
+        verify_alternatives(server.channel, &fake);
         verify_abort_on_error(server.channel);
         verify_error_matrix(server.channel);
         verify_no_endpoint();

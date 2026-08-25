@@ -92,6 +92,15 @@ message ConvertOptions {
   // false: a failed page produces a PageRaw error event and the rest of
   // the document still converts.
   bool abort_on_error = 8;
+
+  // Ask the endpoint for the N best alternates per generated token. They
+  // reach the fragment as the body group's alternatives meta, in
+  // generation order, which is the only route to n-best readings and
+  // costs no extra model call. Zero, the default, asks for none. The
+  // ceiling is 20, the limit OpenAI-compatible endpoints impose; above it
+  // the RPC fails INVALID_ARGUMENT. A long page times N alternates is a
+  // lot of hypotheses, so ask only when something downstream reads them.
+  uint32 top_logprobs = 9;
 }
 
 // Vision-language model presets, mirroring Docling's VlmModelType.

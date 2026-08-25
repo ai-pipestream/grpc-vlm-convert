@@ -33,6 +33,12 @@ struct PageContext {
     // False for mappers and tests with no generation to attribute (the
     // fragment then carries the collector source alone).
     bool has_generation = false;
+    // Alternate readings the endpoint offered for this page's tokens, when
+    // the caller asked for them. Page-scoped, so they ride the fragment's
+    // body group: the response carries no mapping from tokens back to
+    // items, and splitting them across items would invent one.
+    docv1::AlternativesMetaField alternatives;
+    bool has_alternatives = false;
 };
 
 // Maps one page's model response into a Document fragment. Returns true

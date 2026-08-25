@@ -58,6 +58,11 @@ class Channel {
     bool closed_ = false;
 };
 
+// The alternates-per-token ceiling OpenAI-compatible endpoints impose.
+// Asking for more is a 400 from the endpoint, so it fails here first,
+// before a page is paid for.
+constexpr uint32_t kMaxTopLogprobs = 20;
+
 // PNG signature: 8 bytes, 89 50 4E 47 0D 0A 1A 0A.
 bool is_png(const std::string& bytes) {
     static constexpr char kMagic[8] = {'\x89', 'P', 'N', 'G', '\x0d', '\x0a', '\x1a', '\x0a'};
@@ -128,6 +133,12 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
         return client_error(grpc::StatusCode::INVALID_ARGUMENT,
                             "unknown response_format value: " +
                                 std::to_string(static_cast<int>(format)));
+    }
+    if (options.top_logprobs() > kMaxTopLogprobs) {
+        return client_error(grpc::StatusCode::INVALID_ARGUMENT,
+                            "top_logprobs must be 0.." +
+                                std::to_string(kMaxTopLogprobs) + ", got " +
+                                std::to_string(options.top_logprobs()));
     }
     const size_t concurrency =
         options.concurrency() == 0
@@ -200,6 +211,22 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
                 if (result.has_usage) {
                     page.generation.set_prompt_tokens(result.prompt_tokens);
                     page.generation.set_completion_tokens(result.completion_tokens);
+                }
+                if (!result.alternatives.empty()) {
+                    // The readings the model weighed and did not take,
+                    // verbatim and in generation order. They describe the
+                    // page, not any one item: nothing in the response maps
+                    // a token back to the item it ended up in.
+                    page.has_alternatives = true;
+                    page.alternatives.set_created_by(page.generation.model());
+                    for (const TokenAlternative& alternate : result.alternatives) {
+                        auto* hypothesis = page.alternatives.add_hypotheses();
+                        hypothesis->set_text(alternate.token);
+                        if (alternate.has_logprob) {
+                            hypothesis->set_raw_score(alternate.logprob);
+                            hypothesis->set_raw_score_kind("token_logprob");
+                        }
+                    }
                 }
                 if (!result.ok) {
                     auto* raw = event.mutable_page_raw();
@@ -289,6 +316,7 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
                      .prompt = prompt,
                      .stop = stop,
                      .max_tokens = max_tokens,
+                     .top_logprobs = static_cast<int>(options.top_logprobs()),
                      .png = {},
                      .timeout_seconds = static_cast<long>(config_.vlm_timeout_seconds)},
             .format = format,

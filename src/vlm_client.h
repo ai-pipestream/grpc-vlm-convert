@@ -19,10 +19,23 @@ struct VlmCall {
     std::vector<std::string> stop;
     // OpenAI "max_tokens" parameter (per-preset in Docling's specs).
     int max_tokens = 4096;
+    // OpenAI "top_logprobs": how many alternates per generated token the
+    // endpoint should return. Zero omits the parameter and asks for none.
+    int top_logprobs = 0;
     // PNG-encoded page raster.
     std::string png;
     // Whole-call timeout in seconds.
     long timeout_seconds = 300;
+};
+
+// One alternate reading the endpoint offered for a generated token.
+struct TokenAlternative {
+    // The alternate token, verbatim.
+    std::string token;
+    // Its log-probability; has_logprob is false when the endpoint sent
+    // the alternate without a usable score.
+    bool has_logprob = false;
+    double logprob = 0.0;
 };
 
 // The endpoint's answer for one page.
@@ -45,6 +58,10 @@ struct VlmResult {
     // How many tokens the mean was taken over, so a three-token page and a
     // three-thousand-token page stay distinguishable.
     uint64_t scored_tokens = 0;
+    // Alternates the endpoint offered, flattened in generation order:
+    // every alternate of token 1, then every alternate of token 2. Empty
+    // unless the call asked for top_logprobs.
+    std::vector<TokenAlternative> alternatives;
     // The endpoint's stop reason, verbatim ("stop", "length",
     // "content_filter", ...); empty when it reported none. A "length" stop
     // means the answer was cut at max_tokens and the page is short.

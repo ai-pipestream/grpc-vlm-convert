@@ -5,6 +5,7 @@
 // attempt counts are the assertions, not the wall-clock delays.
 
 #include <atomic>
+#include <cmath>
 #include <string>
 #include <thread>
 
@@ -30,12 +31,21 @@ struct ScriptableVlm {
     // When set, the 200 carries the generation facts an OpenAI-compatible
     // endpoint reports: the answering model, the stop reason, usage.
     std::atomic<bool> report_generation{false};
+    // The top_logprobs value the last request asked for, -1 when the
+    // request omitted the parameter.
+    std::atomic<int> asked_top_logprobs{-1};
 
     void start() {
         // The same completions handler under a base path: split_endpoint
         // must post to {prefix}/v1/chat/completions for prefixed endpoints.
-        const auto handler = [this](const httplib::Request&, httplib::Response& response) {
+        const auto handler = [this](const httplib::Request& request,
+                                    httplib::Response& response) {
             attempts++;
+            const nlohmann::json asked =
+                nlohmann::json::parse(request.body, nullptr, false);
+            asked_top_logprobs = asked.is_object() && asked.contains("top_logprobs")
+                                     ? asked["top_logprobs"].get<int>()
+                                     : -1;
             if (failures_before_success.load() > 0) {
                 failures_before_success--;
                 response.status = failure_status.load();
@@ -49,6 +59,23 @@ struct ScriptableVlm {
             nlohmann::json reply = {
                 {"choices",
                  {{{"message", {{"role", "assistant"}, {"content", "<doctag/>"}}}}}}};
+            if (asked_top_logprobs.load() > 0) {
+                // What an endpoint returns for "top_logprobs": N — the
+                // chosen token first, then the runners-up, per token. The
+                // last alternate carries no score, as endpoints do emit.
+                reply["choices"][0]["logprobs"]["content"] = {
+                    {{"token", "cat"},
+                     {"logprob", -0.1},
+                     {"top_logprobs",
+                      {{{"token", "cat"}, {"logprob", -0.1}},
+                       {{"token", "car"}, {"logprob", -2.5}}}}},
+                    {{"token", "sat"},
+                     {"logprob", -0.3},
+                     {"top_logprobs",
+                      {{{"token", "sat"}, {"logprob", -0.3}},
+                       {{"token", "set"}}}}},
+                };
+            }
             if (report_generation.load()) {
                 reply["model"] = "served-model-b";
                 reply["choices"][0]["finish_reason"] = "length";
@@ -132,6 +159,36 @@ int main() {
                 "endpoint origin drops the path");
         require(vlm::endpoint_origin("http://vlm:8080") == "http://vlm:8080",
                 "a bare origin is unchanged");
+        fake.attempts = 0;
+
+        // Alternates: the parameter is omitted unless asked for, and what
+        // comes back is kept verbatim, in generation order.
+        vlm::VlmCall plain = call_to(fake.endpoint());
+        vlm::VlmResult no_alternates = vlm::generate(plain);
+        require(no_alternates.ok && no_alternates.alternatives.empty(),
+                "no top_logprobs asked, no alternates carried");
+        require(fake.asked_top_logprobs == -1,
+                "the parameter is omitted rather than sent as zero");
+
+        vlm::VlmCall nbest = call_to(fake.endpoint());
+        nbest.top_logprobs = 2;
+        vlm::VlmResult alternates = vlm::generate(nbest);
+        require(alternates.ok, "n-best call succeeds: " + alternates.error);
+        require(fake.asked_top_logprobs == 2, "top_logprobs reaches the wire");
+        require(alternates.alternatives.size() == 4,
+                "two alternates for each of two tokens");
+        require(alternates.alternatives[0].token == "cat" &&
+                    alternates.alternatives[1].token == "car" &&
+                    alternates.alternatives[2].token == "sat" &&
+                    alternates.alternatives[3].token == "set",
+                "alternates keep generation order");
+        require(alternates.alternatives[1].has_logprob &&
+                    std::fabs(alternates.alternatives[1].logprob + 2.5) < 1e-9,
+                "an alternate keeps its own score");
+        require(!alternates.alternatives[3].has_logprob,
+                "an alternate sent without a score claims none");
+        require(alternates.has_logprobs && alternates.scored_tokens == 2,
+                "the chosen tokens still drive the page score");
         fake.attempts = 0;
 
         // Transient failure: 503 once, then 200 — the page succeeds.

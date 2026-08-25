@@ -280,6 +280,11 @@ inline void finalize_document(docv1::Document* doc, const PageContext& page,
     docv1::GroupItem* body = doc->mutable_body();
     body->set_self_ref("#/body");
     body->set_content_layer(docv1::CONTENT_LAYER_BODY);
+    // The page's alternate readings belong to the page, so they hang on
+    // its container rather than on any one item.
+    if (page.has_alternatives) {
+        *body->mutable_meta()->mutable_alternatives() = page.alternatives;
+    }
 
     for (const BodyChild& child : order) {
         const std::string self_ref = body_child_ref(child.kind, child.index);

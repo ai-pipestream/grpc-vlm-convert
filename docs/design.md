@@ -177,6 +177,22 @@ and clamping hides an endpoint reporting nonsense. A real per-item
 confidence needs per-item token spans, which the response does not
 carry.
 
+### Alternate readings
+
+`ConvertOptions.top_logprobs` (0 to 20, default 0 = off) adds
+`"top_logprobs": N` to the request. What comes back on
+`logprobs.content[*].top_logprobs` becomes `Hypothesis` entries
+(`text`, `raw_score`, `raw_score_kind` `token_logprob`) on the
+fragment's **body group** `meta.alternatives`, `created_by` naming the
+model that answered.
+
+The body group, not the items: the response says nothing about which
+item a token ended up in, so per-item alternates would be an invention.
+Order is generation order, every alternate of token 1 then of token 2,
+which is what makes the grouping recoverable from N. An alternate the
+endpoint sends without a numeric score keeps its text and claims no
+score. `Hypothesis.range` is never set for the same reason as above.
+
 ### Generation provenance
 
 Every emitted item carries two sources: the `CollectorSource`

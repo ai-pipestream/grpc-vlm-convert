@@ -113,6 +113,11 @@ VlmResult generate(const VlmCall& call) {
     if (!call.stop.empty()) {
         body["stop"] = call.stop;
     }
+    // One key buys the alternates the model weighed per token; asking for
+    // none is the default, so the parameter is omitted rather than zeroed.
+    if (call.top_logprobs > 0) {
+        body["top_logprobs"] = call.top_logprobs;
+    }
 
     const std::string payload = body.dump();
     httplib::Result response;
@@ -217,6 +222,30 @@ VlmResult generate(const VlmCall& call) {
                     logprob != token.end() && logprob->is_number()) {
                     sum += logprob->get<double>();
                     count++;
+                }
+                // The alternates this token was chosen over, when the call
+                // asked for them. Kept verbatim and in order: they are the
+                // model's own n-best reading of the page.
+                const auto top = token.find("top_logprobs");
+                if (top == token.end() || !top->is_array()) {
+                    continue;
+                }
+                for (const auto& alternate : *top) {
+                    if (!alternate.is_object()) {
+                        continue;
+                    }
+                    const auto text = alternate.find("token");
+                    if (text == alternate.end() || !text->is_string()) {
+                        continue;
+                    }
+                    TokenAlternative entry;
+                    entry.token = text->get<std::string>();
+                    if (const auto score = alternate.find("logprob");
+                        score != alternate.end() && score->is_number()) {
+                        entry.has_logprob = true;
+                        entry.logprob = score->get<double>();
+                    }
+                    result.alternatives.push_back(std::move(entry));
                 }
             }
             if (count > 0) {
