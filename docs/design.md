@@ -113,6 +113,10 @@ end offsets). `<lcel>` / `<ucel>` / `<xcel>` fillers are not emitted;
 `<srow>` starts a section row. Header flags (`column_header`,
 `row_header`, `row_section`) are preserved on the emitted cells.
 
+A tag outside the recognized vocabulary keeps its text as a TEXT item
+and its own tag name in `label_raw`, so a label newer than this build
+survives instead of being erased by the fallback.
+
 `<code>` text parses a leading `<_language_>` token into
 `code_language` (exact, case-sensitive match against the
 `CodeLanguageLabel` vocabulary, UNKNOWN fallback) plus

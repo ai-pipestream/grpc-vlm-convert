@@ -501,12 +501,16 @@ bool emit_element(const Element& element, const PageContext& page, docv1::Docume
         add_text(doc, page, docv1::DOC_ITEM_LABEL_TEXT, prov, text);
         index = doc->texts_size() - 1;
     } else {
-        // Open-vocabulary tags (Docling adds labels over time): keep the
-        // text as a plain item rather than dropping the page's content.
+        // Open-vocabulary tags (label vocabularies grow over time): keep
+        // the text as a plain item rather than dropping the page's
+        // content, and keep the model's own label in label_raw so the
+        // name it chose is not erased by the TEXT fallback.
         if (text.empty() && element.otsl.empty()) {
             return false;
         }
-        add_text(doc, page, docv1::DOC_ITEM_LABEL_TEXT, prov, text);
+        docv1::BaseTextItem* item =
+            add_text(doc, page, docv1::DOC_ITEM_LABEL_TEXT, prov, text);
+        item->mutable_text()->mutable_base()->set_label_raw(tag);
         index = doc->texts_size() - 1;
     }
     if (index >= 0) {

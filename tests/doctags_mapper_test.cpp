@@ -156,6 +156,23 @@ void verify_unclosed_and_unknown_tags() {
     require(doc.texts(0).title().base().label() == docv1::DOC_ITEM_LABEL_TITLE, "title label");
     require(doc.texts(2).text().base().label() == docv1::DOC_ITEM_LABEL_PAGE_FOOTER,
             "footer label");
+
+    // A tag outside the known vocabulary keeps its text under the TEXT
+    // fallback and keeps its own name in label_raw, so the label the model
+    // chose survives a vocabulary this build predates.
+    docv1::Document open;
+    require(vlm::mapping::map_doctags(
+                "<doctag><marginalia><loc_10><loc_10><loc_100><loc_40>Side note</marginalia>"
+                "<text><loc_50><loc_120><loc_400><loc_160>Body.</text></doctag>",
+                page_context(), &open, &error),
+            "unknown tag maps: " + error);
+    require(open.texts_size() == 2, "the unknown tag is kept, not dropped");
+    const docv1::TextItemBase& novel = open.texts(0).text().base();
+    require(novel.label() == docv1::DOC_ITEM_LABEL_TEXT, "the best-effort label is TEXT");
+    require(novel.label_raw() == "marginalia", "the model's own label is kept verbatim");
+    require(novel.text() == "Side note", "the text is kept too");
+    require(!open.texts(1).text().base().has_label_raw(),
+            "a tag the vocabulary knows claims no raw label");
 }
 
 void verify_mapping_failures() {
