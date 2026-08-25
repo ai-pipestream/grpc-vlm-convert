@@ -298,8 +298,8 @@ void verify_picture_classification() {
     // ranking, which is why this assertion is the point of the test.
     require(!logo.meta().classification().predictions(0).has_confidence(),
             "a label with no probability behind it claims no confidence");
-    require(data.predicted_classes(0).confidence() == 0.0,
-            "the annotation class asserts no confidence either");
+    require(!data.predicted_classes(0).has_confidence(),
+            "the annotation class reports its confidence absent, not zero");
     // Legacy SmolDocling alias: <line> maps to line_chart.
     require(doc.pictures(1).annotations(0).classification().predicted_classes(0).class_name() ==
                 "line_chart",
