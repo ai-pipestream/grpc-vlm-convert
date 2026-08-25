@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -38,6 +39,17 @@ struct VlmResult {
     // them; has_confidence is false when absent (skipped silently).
     bool has_confidence = false;
     double confidence = 0.0;
+    // The endpoint's stop reason, verbatim ("stop", "length",
+    // "content_filter", ...); empty when it reported none. A "length" stop
+    // means the answer was cut at max_tokens and the page is short.
+    std::string finish_reason;
+    // The model the endpoint says answered, which is not always the one
+    // the call asked for; empty when it echoed none.
+    std::string model;
+    // Token usage the endpoint reported; has_usage is false when absent.
+    bool has_usage = false;
+    uint64_t prompt_tokens = 0;
+    uint64_t completion_tokens = 0;
 };
 
 // Calls {endpoint}/v1/chat/completions with the page image inline as a
@@ -56,5 +68,11 @@ void set_retry_backoff_base_ms(long ms);
 // Validates an endpoint string enough to fail fast at RPC start
 // (scheme://host[:port][/path], http only). Empty detail when valid.
 std::string endpoint_error(const std::string& endpoint);
+
+// Scheme and authority of an endpoint, dropping any path prefix: what a
+// fragment records about who answered. The path is dropped on purpose —
+// deployments put tokens in it. Returns the input unchanged when it does
+// not parse as an endpoint.
+std::string endpoint_origin(const std::string& endpoint);
 
 }  // namespace vlm

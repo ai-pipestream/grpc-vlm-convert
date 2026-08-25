@@ -167,12 +167,29 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
                 page.png = job.image.png();
                 page.source.set_collector("vlm-convert");
                 page.source.set_model(job.model);
+                page.source.set_version(GRPC_VLM_VERSION);
                 // The raster then moves into the call rather than riding
                 // the queue twice (once on the image, once on the call).
                 job.call.png = std::move(*job.image.mutable_png());
                 VlmResult result = generate(job.call);
                 if (result.has_confidence) {
                     page.source.set_confidence(result.confidence);
+                }
+                // Generation provenance rides every item next to the
+                // collector source: the model that actually answered (not
+                // only the one asked for), the endpoint origin, the stop
+                // reason verbatim, and the token cost. Without the stop
+                // reason a page cut off at max_tokens is indistinguishable
+                // from a page that simply ended there.
+                page.has_generation = true;
+                page.generation.set_model(result.model.empty() ? job.model : result.model);
+                page.generation.set_endpoint(endpoint_origin(job.call.endpoint));
+                if (!result.finish_reason.empty()) {
+                    page.generation.set_finish_reason(result.finish_reason);
+                }
+                if (result.has_usage) {
+                    page.generation.set_prompt_tokens(result.prompt_tokens);
+                    page.generation.set_completion_tokens(result.completion_tokens);
                 }
                 if (!result.ok) {
                     auto* raw = event.mutable_page_raw();

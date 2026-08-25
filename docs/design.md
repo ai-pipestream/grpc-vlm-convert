@@ -147,6 +147,23 @@ still yields the PictureItem, just without an image.
 Logprobs: if the VLM endpoint returns them, attach `confidence` on the
 `CollectorSource`. Skip silently when absent.
 
+### Generation provenance
+
+Every emitted item carries two sources: the `CollectorSource`
+(`vlm-convert`, the resolved model name, this server's version) and a
+`GenerationSource` describing the call that produced the page — the
+model the endpoint says answered (the requested name only when it
+echoes none), the endpoint origin (scheme and authority; the path is
+dropped because deployments hide tokens there), the `finish_reason`
+verbatim, and `prompt_tokens` / `completion_tokens` when the endpoint
+reports usage. All of it is optional on the wire and recorded only when
+present.
+
+The `finish_reason` is the load-bearing one: `max_tokens` defaults to
+4096, and a page whose answer hit that ceiling maps into a fragment
+that looks complete and is not. A `"length"` stop reason is the only
+marker that says so.
+
 ### Retries
 
 The HTTP client retries a page's VLM call up to 5 times with

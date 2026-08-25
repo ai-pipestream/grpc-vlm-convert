@@ -509,7 +509,7 @@ bool emit_key_value_region(const std::string& chunk, const PageContext& page,
     docv1::KeyValueItem* kv = doc->add_key_value_items();
     kv->set_label(docv1::DOC_ITEM_LABEL_KEY_VALUE_REGION);
     kv->set_content_layer(docv1::CONTENT_LAYER_BODY);
-    add_collector_source(kv->mutable_source(), page);
+    add_sources(kv->mutable_source(), page);
 
     // The region's own box is the loc run between the opening tag and the
     // first <key_N> cell; without it docling passes prov=None, so no

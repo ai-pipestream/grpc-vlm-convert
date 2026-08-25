@@ -35,11 +35,15 @@ inline docv1::ProvenanceItem page_prov(const PageContext& page) {
     return make_prov(page, full_page_box(page));
 }
 
-// Attributes an item to this collector. Sources never overwrite each
+// Attributes an item to this collector and, when the page carries one, to
+// the model invocation that generated it. Sources never overwrite each
 // other; the coordinator merges additively.
-inline void add_collector_source(
-    google::protobuf::RepeatedPtrField<docv1::SourceType>* sources, const PageContext& page) {
+inline void add_sources(google::protobuf::RepeatedPtrField<docv1::SourceType>* sources,
+                        const PageContext& page) {
     *sources->Add()->mutable_collector() = page.source;
+    if (page.has_generation) {
+        *sources->Add()->mutable_generation() = page.generation;
+    }
 }
 
 // Common stamping for a text item: provenance, source, orig/text.
@@ -51,7 +55,7 @@ inline void fill_text_base(docv1::TextItemBase* base, const PageContext& page,
     *base->add_prov() = prov;
     base->set_orig(text);
     base->set_text(text);
-    add_collector_source(base->mutable_source(), page);
+    add_sources(base->mutable_source(), page);
 }
 
 inline docv1::BaseTextItem* add_text(docv1::Document* doc, const PageContext& page,
@@ -110,7 +114,7 @@ inline docv1::BaseTextItem* add_code(docv1::Document* doc, const PageContext& pa
     if (!language_raw.empty()) {
         code->set_code_language_raw(language_raw);
     }
-    add_collector_source(code->mutable_source(), page);
+    add_sources(code->mutable_source(), page);
     return item;
 }
 
@@ -129,7 +133,7 @@ inline docv1::PictureItem* add_picture(docv1::Document* doc, const PageContext& 
     picture->set_label(docv1::DOC_ITEM_LABEL_PICTURE);
     picture->set_content_layer(docv1::CONTENT_LAYER_BODY);
     *picture->add_prov() = prov;
-    add_collector_source(picture->mutable_source(), page);
+    add_sources(picture->mutable_source(), page);
     return picture;
 }
 
@@ -139,7 +143,7 @@ inline docv1::TableItem* add_table(docv1::Document* doc, const PageContext& page
     table->set_label(docv1::DOC_ITEM_LABEL_TABLE);
     table->set_content_layer(docv1::CONTENT_LAYER_BODY);
     *table->add_prov() = prov;
-    add_collector_source(table->mutable_source(), page);
+    add_sources(table->mutable_source(), page);
     return table;
 }
 

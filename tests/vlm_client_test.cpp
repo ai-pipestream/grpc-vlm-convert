@@ -27,6 +27,9 @@ struct ScriptableVlm {
     std::atomic<int> failures_before_success{0};
     std::atomic<int> failure_status{503};
     std::atomic<bool> garbage_200{false};
+    // When set, the 200 carries the generation facts an OpenAI-compatible
+    // endpoint reports: the answering model, the stop reason, usage.
+    std::atomic<bool> report_generation{false};
 
     void start() {
         // The same completions handler under a base path: split_endpoint
@@ -46,6 +49,13 @@ struct ScriptableVlm {
             nlohmann::json reply = {
                 {"choices",
                  {{{"message", {{"role", "assistant"}, {"content", "<doctag/>"}}}}}}};
+            if (report_generation.load()) {
+                reply["model"] = "served-model-b";
+                reply["choices"][0]["finish_reason"] = "length";
+                reply["usage"] = {{"prompt_tokens", 1200},
+                                  {"completion_tokens", 4096},
+                                  {"total_tokens", 5296}};
+            }
             response.set_content(reply.dump(), "application/json");
         };
         server.Post("/v1/chat/completions", handler);
@@ -93,6 +103,35 @@ int main() {
         vlm::VlmResult prefixed = vlm::generate(call_to(fake.endpoint() + "/base"));
         require(prefixed.ok, "prefixed endpoint resolves: " + prefixed.error);
         require(prefixed.text == "<doctag/>", "prefixed endpoint answer");
+        fake.attempts = 0;
+
+        // Generation facts: the answering model, the stop reason verbatim,
+        // and usage all survive the parse. An answer cut at max_tokens is
+        // a plain 200 — "length" is the only thing that says so.
+        fake.report_generation = true;
+        vlm::VlmResult truncated = vlm::generate(call_to(fake.endpoint()));
+        require(truncated.ok, "truncated answer is still a 200: " + truncated.error);
+        require(truncated.finish_reason == "length", "finish_reason is kept verbatim");
+        require(truncated.model == "served-model-b",
+                "the model the endpoint says answered, not the one asked for");
+        require(truncated.has_usage && truncated.prompt_tokens == 1200 &&
+                    truncated.completion_tokens == 4096,
+                "token usage is read from the response");
+        fake.report_generation = false;
+
+        // An endpoint that reports none of it leaves every field unset
+        // rather than guessing.
+        vlm::VlmResult silent = vlm::generate(call_to(fake.endpoint()));
+        require(silent.ok && silent.finish_reason.empty() && silent.model.empty() &&
+                    !silent.has_usage,
+                "absent generation facts stay absent");
+
+        // The recorded endpoint drops any path prefix: deployments put
+        // tokens there and a fragment must not carry them.
+        require(vlm::endpoint_origin("http://vlm:8080/base/secret") == "http://vlm:8080",
+                "endpoint origin drops the path");
+        require(vlm::endpoint_origin("http://vlm:8080") == "http://vlm:8080",
+                "a bare origin is unchanged");
         fake.attempts = 0;
 
         // Transient failure: 503 once, then 200 — the page succeeds.

@@ -24,6 +24,14 @@ struct PageContext {
     // Collector attribution stamped on every item ("vlm-convert", the
     // model name, optional confidence from endpoint logprobs).
     docv1::CollectorSource source;
+    // The model invocation that produced this page: which model answered,
+    // from which endpoint, how the generation stopped, what it cost. Rides
+    // every item's source list next to the collector source, so a consumer
+    // holding one item can tell a truncated answer from a complete one.
+    docv1::GenerationSource generation;
+    // False for mappers and tests with no generation to attribute (the
+    // fragment then carries the collector source alone).
+    bool has_generation = false;
 };
 
 // Maps one page's model response into a Document fragment. Returns true

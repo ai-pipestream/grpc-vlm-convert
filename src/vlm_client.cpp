@@ -85,6 +85,14 @@ std::string endpoint_error(const std::string& endpoint) {
     return "";
 }
 
+std::string endpoint_origin(const std::string& endpoint) {
+    std::string origin, path;
+    if (!split_endpoint(endpoint, &origin, &path)) {
+        return endpoint;
+    }
+    return origin;
+}
+
 VlmResult generate(const VlmCall& call) {
     VlmResult result;
     std::string origin, path;
@@ -160,6 +168,32 @@ VlmResult generate(const VlmCall& call) {
         return result;
     }
     result.text = choices[0]["message"]["content"].get<std::string>();
+
+    // Generation facts: how the answer terminated, which model produced
+    // it, and what it cost. All optional on the wire, all recorded when
+    // present — a "length" finish_reason is the only marker that a short
+    // page is a truncation rather than a short page.
+    if (const auto reason = choices[0].find("finish_reason");
+        reason != choices[0].end() && reason->is_string()) {
+        result.finish_reason = reason->get<std::string>();
+    }
+    if (const auto model = parsed.find("model");
+        model != parsed.end() && model->is_string()) {
+        result.model = model->get<std::string>();
+    }
+    if (const auto usage = parsed.find("usage");
+        usage != parsed.end() && usage->is_object()) {
+        if (const auto prompt = usage->find("prompt_tokens");
+            prompt != usage->end() && prompt->is_number_unsigned()) {
+            result.prompt_tokens = prompt->get<uint64_t>();
+            result.has_usage = true;
+        }
+        if (const auto completion = usage->find("completion_tokens");
+            completion != usage->end() && completion->is_number_unsigned()) {
+            result.completion_tokens = completion->get<uint64_t>();
+            result.has_usage = true;
+        }
+    }
 
     // Logprobs are optional (Docling's OpenAI VLM logprobs knob). Mean
     // token probability becomes the CollectorSource confidence; absent

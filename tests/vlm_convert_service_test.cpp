@@ -106,8 +106,11 @@ struct FakeVlm {
                     "</doctag>";
             }
             nlohmann::json reply = {
+                {"model", "served-granite"},
+                {"usage", {{"prompt_tokens", 1200}, {"completion_tokens", 512}}},
                 {"choices",
                  {{{"message", {{"role", "assistant"}, {"content", content}}},
+                   {"finish_reason", "length"},
                    {"logprobs",
                     {{"content",
                       {{{"token", "a"}, {"logprob", -0.1}},
@@ -272,8 +275,24 @@ void verify_streaming_and_failure_isolation(const std::shared_ptr<grpc::Channel>
         require(base.source(0).collector().collector() == "vlm-convert", "collector tagged");
         require(base.source(0).collector().model() == "ibm-granite/granite-docling-258M",
                 "preset model tagged");
+        require(!base.source(0).collector().version().empty(),
+                "the collector stamps its own version");
         require(base.source(0).collector().has_confidence(),
                 "logprobs become CollectorSource confidence");
+        // Generation provenance next to the collector source: the item
+        // says which model answered, from where, how the answer stopped,
+        // and what it cost.
+        require(base.source_size() == 2 && base.source(1).has_generation(),
+                "every item carries a GenerationSource beside the collector source");
+        const auto& generation = base.source(1).generation();
+        require(generation.model() == "served-granite",
+                "the endpoint's own model name wins over the requested one");
+        require(generation.endpoint().starts_with("http://127.0.0.1:"),
+                "the answering endpoint is recorded");
+        require(generation.finish_reason() == "length",
+                "a truncated page says so, verbatim");
+        require(generation.prompt_tokens() == 1200 && generation.completion_tokens() == 512,
+                "token usage rides the fragment");
     }
     require(out.started.size() == 3, "PageStarted for every page");
     require(out.got_complete && out.complete_last, "ConvertComplete is the last event");

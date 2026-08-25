@@ -182,8 +182,9 @@ message PageStarted {
 
 // A converted page as a Document fragment. Fragments merge with the same
 // additive rules as other collectors; items carry a CollectorSource
-// ("vlm-convert", the model name, and the endpoint's confidence when it
-// reports logprobs).
+// ("vlm-convert", the model name, this server's version) and a
+// GenerationSource naming the model that answered, the endpoint, the stop
+// reason, and the token usage of the call that produced the page.
 message PageDocument {
   // 1-based page number this fragment belongs to.
   uint32 page_no = 1;
