@@ -110,10 +110,17 @@ end offsets). `<lcel>` / `<ucel>` / `<xcel>` fillers are not emitted;
 A `<caption>` inside a table, picture, or chart chunk becomes a CAPTION
 text item linked via the item's `captions` ref, emitted before its item.
 
+Free text inside a `<picture>` or `<chart>` chunk is the model's own
+description of the region: it becomes `meta.description.text` plus a
+`description` annotation, both with created_by/provenance
+`load_from_doctags` and no confidence, since the model reports none.
+
 Classification tags inside `<picture>` and `<chart>` chunks produce a
-classification prediction with confidence 1.0 and created_by/provenance
+classification prediction with created_by/provenance
 `load_from_doctags`, recorded in both `meta.classification` and the
-`annotations` union. The recognized tag set is the v2 label list, the
+`annotations` union. The prediction carries no confidence: the tag is a
+bare label with no probability behind it, and an unset optional says
+"not reported" where 1.0 would say "certain". The recognized tag set is the v2 label list, the
 legacy v1 labels, and the legacy aliases of the smol preset (e.g.
 `line` and `dot_line` map to `line_chart`), all in
 `kClassificationLabels` in `src/mapping/doctags.cpp`. A `<chart>`

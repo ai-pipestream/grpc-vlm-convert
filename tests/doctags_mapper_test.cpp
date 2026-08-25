@@ -234,16 +234,69 @@ void verify_picture_classification() {
     const docv1::PictureClassificationData& data = logo.annotations(0).classification();
     require(data.provenance() == "load_from_doctags", "classification provenance");
     require(data.predicted_classes_size() == 1 &&
-                data.predicted_classes(0).class_name() == "logo" &&
-                data.predicted_classes(0).confidence() == 1.0,
-            "predicted class with confidence 1.0");
+                data.predicted_classes(0).class_name() == "logo",
+            "predicted class named");
     require(logo.meta().classification().predictions_size() == 1 &&
                 logo.meta().classification().predictions(0).created_by() == "load_from_doctags",
             "meta prediction carries created_by");
+    // The tag is a bare label: no probability is reported, so none is
+    // claimed. Fabricated certainty survives into every downstream
+    // ranking, which is why this assertion is the point of the test.
+    require(!logo.meta().classification().predictions(0).has_confidence(),
+            "a label with no probability behind it claims no confidence");
+    require(data.predicted_classes(0).confidence() == 0.0,
+            "the annotation class asserts no confidence either");
     // Legacy SmolDocling alias: <line> maps to line_chart.
     require(doc.pictures(1).annotations(0).classification().predicted_classes(0).class_name() ==
                 "line_chart",
             "legacy alias maps to the v2 class");
+}
+
+// The model's own words inside a picture chunk are the only description
+// of that region anyone will ever get; they used to be parsed and thrown
+// away.
+void verify_picture_description() {
+    const std::string text =
+        "<doctag>"
+        "<picture><loc_100><loc_100><loc_300><loc_300><photograph>"
+        "A red tractor parked in front of a barn."
+        "<caption><loc_100><loc_310><loc_300><loc_330>Figure 2</caption>"
+        "</picture>"
+        "<picture><loc_10><loc_10><loc_60><loc_60><icon></picture>"
+        "</doctag>";
+    docv1::Document doc;
+    std::string error;
+    require(vlm::mapping::map_doctags(text, page_context(), &doc, &error),
+            "described picture maps: " + error);
+    require(doc.pictures_size() == 2, "two pictures");
+    const docv1::PictureItem& described = doc.pictures(0);
+    require(described.meta().description().text() ==
+                "A red tractor parked in front of a barn.",
+            "the region text becomes the picture description");
+    require(described.meta().description().created_by() == "load_from_doctags",
+            "the description names its producer");
+    require(!described.meta().description().has_confidence(),
+            "a transcribed description claims no confidence");
+    bool saw_description = false;
+    for (const docv1::PictureAnnotation& annotation : described.annotations()) {
+        if (annotation.has_description()) {
+            saw_description = true;
+            require(annotation.description().kind() == "description" &&
+                        annotation.description().provenance() == "load_from_doctags",
+                    "description annotation kind and provenance");
+            require(annotation.description().text().contains("red tractor"),
+                    "description annotation carries the same text");
+        }
+    }
+    require(saw_description, "the description also lands in the annotations union");
+    // The caption is a separate linked item, never folded into the
+    // description.
+    require(described.captions_size() == 1, "caption still links as its own item");
+    require(!described.meta().description().text().contains("Figure 2"),
+            "caption text stays out of the description");
+    // A picture the model said nothing about claims no description.
+    require(!doc.pictures(1).meta().has_description(),
+            "a picture with no inner text gets no description");
 }
 
 void verify_chart() {
@@ -545,6 +598,7 @@ int main() {
         verify_code_language();
         verify_charspan();
         verify_picture_classification();
+        verify_picture_description();
         verify_chart();
         verify_source_order();
         verify_table_caption();

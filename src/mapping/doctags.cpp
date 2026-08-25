@@ -332,10 +332,11 @@ int emit_caption(const Element& element, const PageContext& page, docv1::Documen
     return index;
 }
 
-// <picture> / <chart>: PictureItem with the region crop, the classification
-// prediction (confidence 1.0, created_by load_from_doctags), and — for
-// charts — the embedded OTSL as tabular chart data. Both land in meta and
-// in the annotations union, as docling-core does.
+// <picture> / <chart>: PictureItem with the region crop, the model's own
+// words about the region as the description, the classification
+// prediction (created_by load_from_doctags), and — for charts — the
+// embedded OTSL as tabular chart data. Each lands in meta and in the
+// annotations union.
 bool emit_picture(const Element& element, const PageContext& page, docv1::Document* doc,
                   std::vector<BodyChild>* order) {
     const docv1::BoundingBox box = locs_box(element.locs, page);
@@ -347,20 +348,35 @@ bool emit_picture(const Element& element, const PageContext& page, docv1::Docume
         picture->add_captions()->set_ref(body_child_ref(BodyChild::TEXT, caption_index));
     }
 
+    // What the model wrote inside the tag is its description of the
+    // region: the one thing about a picture only the model can supply.
+    // No confidence is claimed for it — the tag carries none.
+    const std::string description = trim(element.text);
+    if (!description.empty()) {
+        auto* meta_description = picture->mutable_meta()->mutable_description();
+        meta_description->set_text(description);
+        meta_description->set_created_by(kCreatedBy);
+        auto* annotation = picture->add_annotations()->mutable_description();
+        annotation->set_kind("description");
+        annotation->set_text(description);
+        annotation->set_provenance(kCreatedBy);
+    }
+
     const std::string classification = pick_classification(element.class_tags);
     if (!classification.empty()) {
+        // The tag is a bare label with no probability attached, so no
+        // confidence is set: an unset optional says "not reported", and
+        // 1.0 would say "certain" to every consumer that ranks on it.
         auto* prediction = picture->mutable_meta()
                                ->mutable_classification()
                                ->add_predictions();
         prediction->set_class_name(classification);
-        prediction->set_confidence(1.0);
         prediction->set_created_by(kCreatedBy);
         auto* data = picture->add_annotations()->mutable_classification();
         data->set_kind("classification");
         data->set_provenance(kCreatedBy);
         auto* predicted = data->add_predicted_classes();
         predicted->set_class_name(classification);
-        predicted->set_confidence(1.0);
     }
 
     if (element.name == "chart" && !element.otsl.empty()) {
