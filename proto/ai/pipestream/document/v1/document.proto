@@ -3,6 +3,7 @@ syntax = "proto3";
 package ai.pipestream.document.v1;
 
 import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
 
 option java_multiple_files = true;
 option java_outer_classname = "DocumentProto";
@@ -11,9 +12,21 @@ option java_package = "ai.pipestream.document.v1";
 // Pipestream document structure.
 //
 // This proto defines the complete structure of a parsed document. The schema
-// tracks field-for-field parity with the docling-core v2 JSON schema so that
-// documents interoperate with that ecosystem; parity is maintained by review,
-// and "upstream" in comments below refers to that schema.
+// is the upstream document v2 JSON schema mirrored field for field, plus the
+// documented extensions this repo adds on top of it; every extension is
+// called out at its own field and is additive, so removing them all yields a
+// document the upstream dialect can express. The mirror is maintained by
+// review, and "upstream" in comments below refers to that schema.
+//
+// Field-number policy:
+// - `custom_fields` is pinned at 100 in every message that carries one, so
+//   the escape hatch sits at the same number wherever a reader looks for it.
+// - Extension fields are appended after the numbers the upstream mirror
+//   occupies, never interleaved with them, so an upstream addition lands on
+//   the number upstream chose.
+// - Numbers are never reused. No field in this file has ever been removed,
+//   which is why there are no `reserved` ranges to guard; the day one is,
+//   its number and name go into a `reserved` statement in the same change.
 //
 // Document Structure Overview:
 // ===========================
@@ -29,7 +42,10 @@ option java_package = "ai.pipestream.document.v1";
 
 // Document is the root message representing a complete parsed document.
 message Document {
-  // Schema identifier for versioning (e.g., "docling_document_v2", kept for upstream interop)
+  // Schema identifier for versioning (e.g., "docling_document_v2"). Producers
+  // stamp it, but upstream interop does not run through this field: the
+  // canonical renderer emits the upstream identity from its own constant and
+  // ignores whatever a producer put here.
   optional string schema_name = 1;
 
   // Version number of the upstream schema used
@@ -75,6 +91,40 @@ message Document {
 
   // Map of page numbers to page metadata.
   map<int32, PageItem> pages = 12;
+
+  // Fields 16 and up extend the model beyond the upstream dialect; the
+  // renderers that produce that dialect ignore them.
+
+  // Source-declared document metadata (title, authors, dates, language).
+  optional DocumentMeta source_meta = 16;
+
+  // Nested payloads the source carries (mail parts, embedded files, page
+  // attachments), addressable for fan-out parsing.
+  repeated SubDocumentRef attachments = 17;
+
+  // The source's own table of contents, when it declares one.
+  repeated OutlineEntry outline = 18;
+
+  // Page-level meta tags for web sources (name/content pairs).
+  repeated MetaTag meta_tags = 19;
+
+  // Machine-readable structured data blocks embedded in the source
+  // (JSON-LD, microdata, OpenGraph), verbatim.
+  repeated StructuredData structured_data = 20;
+
+  // Media stream metadata for audio and video sources.
+  optional MediaMeta media = 21;
+
+  // Tracked changes the source records (insertions, deletions, format
+  // edits), each anchored to the content it touches.
+  repeated ChangeRecord changes = 22;
+
+  // Named anchors the source declares (bookmarks, reference marks), the
+  // targets its own cross-references point at.
+  repeated NamedAnchor anchors = 23;
+
+  // Message envelope for mail sources.
+  optional EmailMeta email = 24;
 }
 
 // DocumentOrigin contains metadata about the source document file.
@@ -90,6 +140,10 @@ message DocumentOrigin {
 
   // Optional URI/URL where the document was retrieved from
   optional string uri = 4;
+
+  // Web retrieval provenance for crawled sources (extension beyond the
+  // upstream dialect).
+  optional WebMeta web = 5;
 }
 
 // ContentLayer defines the semantic layer where content appears in the document.
@@ -127,6 +181,8 @@ message GroupItem {
   optional BaseMeta meta = 5;
   optional string name = 6;
   GroupLabel label = 7;
+  // Raw label fallback for forward-compatibility with newer label vocabularies.
+  optional string label_raw = 8;
 }
 
 // RefItem is a JSON Pointer reference to another item in the document.
@@ -175,7 +231,7 @@ message TrackSource {
 }
 
 // CollectorSource attributes an item to the parser collector that produced
-// it. This is a pipestream extension over the upstream docling schema:
+// it. This is a pipestream extension over the upstream schema:
 // upstream SourceType carries only media-track cues, while the
 // scatter-gather pipeline needs every collector's output attributable so
 // additive merges never collide silently. Sources never overwrite each
@@ -192,6 +248,11 @@ message CollectorSource {
   // The producer's confidence in this item, 0.0 to 1.0, when the engine
   // reports one.
   optional double confidence = 4;
+  // The engine's own uncalibrated signal behind that confidence, verbatim,
+  // with its kind named (avg_logprob, softmax, distance) so consumers never
+  // mistake it for a probability.
+  optional double raw_score = 5;
+  optional string raw_score_kind = 6;
 }
 
 // SourceType is a union of possible source descriptors.
@@ -199,6 +260,9 @@ message SourceType {
   oneof source {
     TrackSource track = 1;
     CollectorSource collector = 2;
+    // Model-generated content names its generation (extension beyond the
+    // upstream dialect).
+    GenerationSource generation = 3;
   }
 }
 
@@ -614,6 +678,21 @@ message TextItemBase {
   optional string hyperlink = 11;
   repeated SourceType source = 12;
   repeated FineRef comments = 13;
+
+  // Character-level formatting and link runs inside `text` (extension
+  // beyond the upstream dialect, which styles whole items only).
+  repeated InlineSpan spans = 14;
+
+  // Admonition kind for callout blocks (info, warning, note, tip), when the
+  // source marks one (extension beyond the upstream dialect).
+  optional string admonition_kind = 15;
+
+  // Raw label fallback for forward-compatibility with newer label vocabularies.
+  optional string label_raw = 16;
+
+  // The source's own named style for the item (a word processor's
+  // paragraph style), verbatim; extension beyond the upstream dialect.
+  optional string style_name = 17;
 }
 
 // TitleItem represents a document title or major heading.
@@ -677,6 +756,8 @@ message CodeItem {
   optional CodeLanguageLabel code_language = 18;
   // Raw language string (fallback for unknown enum values).
   optional string code_language_raw = 19;
+  // Raw label fallback for forward-compatibility with newer label vocabularies.
+  optional string label_raw = 20;
 }
 
 // FormulaItem represents a mathematical formula or equation.
@@ -690,10 +771,27 @@ message TextItem {
 }
 
 // ProvenanceItem tracks the precise location of content in the source document.
+// Fields 4 and up extend the model beyond the upstream dialect: a source is
+// located in whatever space it actually has - a page and box, a time range,
+// a byte range, a spreadsheet cell - and an item may carry several.
 message ProvenanceItem {
   int32 page_no = 1;
   BoundingBox bbox = 2;
   IntSpan charspan = 3;
+
+  // Where the content sits in a media timeline (audio, video).
+  optional TimeSpan time = 4;
+
+  // Where the content sits in the source byte stream (fixed-length records,
+  // archive members).
+  optional ByteSpan byte_range = 5;
+
+  // Where the content sits in a sheet grid.
+  optional GridCell grid = 6;
+
+  // The exact quadrilateral for rotated or skewed text; bbox stays the
+  // axis-aligned hull.
+  repeated Point polygon = 7;
 }
 
 // BoundingBox defines a rectangular region in page coordinates.
@@ -841,6 +939,12 @@ message PictureScatterChartData {
 }
 
 // PictureAnnotation is a union of all annotation types that can appear on a picture.
+//
+// PLACEMENT RULE: item `meta` is the export contract; the canonical dialect
+// reads meta and ignores this list entirely (upstream deprecates it in favor
+// of meta). Producers that want their data visible in dialect exports MUST
+// write it into meta (a first-class slot or a namespaced custom field) and
+// may additionally mirror it here for wire consumers.
 message PictureAnnotation {
   oneof annotation {
     DescriptionAnnotation description = 1;
@@ -853,6 +957,10 @@ message PictureAnnotation {
     PictureStackedBarChartData stacked_bar_chart = 8;
     PicturePieChartData pie_chart = 9;
     PictureScatterChartData scatter_chart = 10;
+    // Decoded machine-readable code payloads (extension beyond the upstream
+    // dialect; the misc-annotation convention stays emitted alongside for
+    // one release).
+    BarcodeAnnotation barcode = 11;
   }
 }
 
@@ -994,6 +1102,15 @@ message TableData {
   Orientation orientation = 5;
   // Raw orientation fallback for forward-compatibility with newer rotation values.
   optional string orientation_raw = 6;
+  // Column declarations when the source has a schema (spreadsheet types,
+  // fixed-record layouts); extension beyond the upstream dialect.
+  repeated TableColumnSchema columns = 7;
+  // Per-row provenance for record-oriented sources (byte ranges, grid
+  // rows); extension beyond the upstream dialect.
+  repeated ProvenanceItem row_prov = 8;
+  // The fixed-record layout this table was decoded with; extension beyond
+  // the upstream dialect.
+  optional RecordLayoutMeta record_layout = 10;
 }
 
 // TableRow represents a single row in the table.
@@ -1016,6 +1133,14 @@ message TableCell {
   bool row_section = 11;
   bool fillable = 12;
   optional RefItem ref = 13;
+
+  // The cell's typed value when the source has one; `text` stays the
+  // display string (extension beyond the upstream dialect).
+  optional CellValue value = 14;
+
+  // Character-level formatting and link runs inside `text` (extension
+  // beyond the upstream dialect).
+  repeated InlineSpan spans = 15;
 }
 
 // KeyValueItem represents a key-value pair extracted from forms.
@@ -1129,4 +1254,321 @@ message PageItem {
   Size size = 1;
   optional ImageRef image = 2;
   int32 page_no = 3;
+  // The coordinate unit this page's size and its items' boxes are measured
+  // in (px, pt, twip); unset keeps the producer's historical space.
+  // Extension beyond the upstream dialect.
+  optional string unit = 4;
+  // Extraction diagnostics for the page, when the producer measures them.
+  optional PageQuality quality = 5;
+}
+
+// PageQuality carries a page's extraction diagnostics as the measurements
+// they are, not booleans.
+message PageQuality {
+  // Letter-frequency garble score for the page's text layer, 0.0 clean.
+  optional double garble_score = 1;
+  // Count of replacement-character runs in the text layer.
+  optional int32 replacement_runs = 2;
+  // The producer's verdict that raster OCR would beat this text layer.
+  optional bool ocr_recommended = 3;
+  // Rotation the producer detected and applied, degrees clockwise.
+  optional double rotation_degrees = 4;
+}
+
+// ============================================================================
+// Model extensions
+//
+// Everything below extends the model beyond the upstream dialect. The
+// renderers that produce that dialect ignore these shapes; every other
+// consumer may rely on them. All extensions are additive: removing them
+// yields a document the upstream dialect can express.
+// ============================================================================
+
+// TimeSpan locates content in a media timeline.
+message TimeSpan {
+  double start_ms = 1;
+  double end_ms = 2;
+  // Which stream the span belongs to, for multi-track sources.
+  optional int32 track = 3;
+  // Speaker or voice attribution for the span.
+  optional string speaker = 4;
+}
+
+// ByteSpan locates content in the source byte stream.
+message ByteSpan {
+  uint64 start = 1;
+  uint64 end = 2;
+}
+
+// GridCell locates content in a sheet grid (zero-based).
+message GridCell {
+  int32 row = 1;
+  int32 col = 2;
+  optional string sheet = 3;
+}
+
+// Point is one vertex of a provenance polygon, in the same coordinate space
+// as the owning bounding box.
+message Point {
+  double x = 1;
+  double y = 2;
+}
+
+// InlineSpan is one formatting or link run inside an item's text. Ranges are
+// code points into `text`, half-open, and may overlap (bold and linked at
+// once arrives as two spans or one span carrying both).
+message InlineSpan {
+  IntSpan range = 1;
+  optional Formatting formatting = 2;
+  optional string hyperlink = 3;
+  // Internal cross-reference target (footnote, citation, section).
+  optional FineRef target = 4;
+  // Character-run attributes beyond the boolean set: the source's font
+  // family and size (points), text color as #rrggbb, and the run's own
+  // language tag when it differs from the item's.
+  optional string font_family = 5;
+  optional double font_size_pt = 6;
+  optional string color = 7;
+  optional string language = 8;
+  // The source field code a generated run came from (a page number, a
+  // date, a cross-reference), so resolved field text stays distinguishable
+  // from authored text.
+  optional string field_code = 9;
+}
+
+// DocumentMeta carries the metadata the source declares about itself.
+message DocumentMeta {
+  optional string title = 1;
+  repeated string authors = 2;
+  // Creation and modification instants. The typed field carries the parsed
+  // instant; the _raw twin keeps the source's own spelling and is the only
+  // field set when the source's value does not parse.
+  optional google.protobuf.Timestamp created = 3;
+  optional google.protobuf.Timestamp modified = 4;
+  // BCP 47 language tag.
+  optional string language = 5;
+  // The software that produced the source file.
+  optional string generator = 6;
+  repeated string keywords = 7;
+  // The schema the source declares for itself (an XML xsi:schemaLocation).
+  optional string schema_location = 8;
+  optional string created_raw = 9;
+  optional string modified_raw = 10;
+  // Source metadata that is genuinely open vocabulary. Data whose shape the
+  // fleet knows gets a typed field, never an entry here.
+  map<string, string> extra = 100;
+}
+
+// CellValue is a table cell's typed value; the cell's `text` stays the
+// display string.
+message CellValue {
+  oneof kind {
+    double number = 1;
+    bool boolean = 2;
+    // The parsed date or datetime, timezone-honest: spreadsheet dates are
+    // civil values, not instants.
+    CivilDateTime datetime = 3;
+    // The source formula, in the source's own syntax.
+    string formula = 4;
+    // The source's error literal (a spreadsheet #DIV/0!, a conversion
+    // failure marker).
+    string error = 5;
+  }
+  // The source's display format string for the value.
+  optional string number_format = 10;
+}
+
+// CivilDateTime is a wall-clock date or datetime as the source wrote it,
+// without inventing a timezone the source never stated.
+message CivilDateTime {
+  int32 year = 1;
+  int32 month = 2;
+  int32 day = 3;
+  optional int32 hour = 4;
+  optional int32 minute = 5;
+  optional int32 second = 6;
+  optional int32 nanos = 7;
+  // Only when the source itself states an offset.
+  optional int32 utc_offset_minutes = 8;
+}
+
+// TableColumnSchema declares one column of a schema-carrying table
+// (spreadsheet types, fixed-record layouts).
+message TableColumnSchema {
+  string name = 1;
+  // The source's own type name (copybook usage, cell type, SQL type).
+  optional string declared_type = 2;
+  // Copybook picture clause, when the source is a fixed-record layout.
+  optional string picture = 3;
+  optional uint64 byte_offset = 4;
+  optional uint64 byte_size = 5;
+  // Copybook level number.
+  optional int32 level = 6;
+  // One-based occurrence for a column inside an OCCURS group; unset for
+  // columns that occur once.
+  optional int32 occurs_index = 7;
+  // The column's display width in the page unit, when the source declares
+  // one.
+  optional double width = 9;
+  // Named value conditions declared on the column (copybook level-88).
+  repeated ValueCondition conditions = 8;
+}
+
+// SubDocumentRef registers one nested payload the source carries (a mail
+// part, an embedded file, a page attachment) so a downstream parser can fan
+// out on it. The id is the stable pointer other conventions in the fleet
+// already embed in item text (for example part:<part_id>).
+message SubDocumentRef {
+  string id = 1;
+  string name = 2;
+  string media_type = 3;
+  uint64 size_bytes = 4;
+  // The item that mentions or anchors the payload, when one does.
+  optional string item_ref = 5;
+}
+
+// WebMeta carries retrieval provenance for crawled sources.
+message WebMeta {
+  // The URI the content was actually fetched from.
+  optional string target_uri = 1;
+  // The page's self-declared canonical URI.
+  optional string canonical_uri = 2;
+  // Capture instant; the _raw twin keeps the source's spelling and is the
+  // only field set when it does not parse.
+  optional google.protobuf.Timestamp crawl_time = 3;
+  optional int32 http_status = 4;
+  optional string content_language = 5;
+  // Response headers, lower-cased names. Header names are an open
+  // vocabulary; the map is the honest type here.
+  map<string, string> headers = 6;
+  optional string crawl_time_raw = 7;
+}
+
+// MetaTag is one page-level name/content meta pair.
+message MetaTag {
+  string name = 1;
+  string content = 2;
+}
+
+// StructuredData is one machine-readable data block embedded in the source,
+// verbatim.
+message StructuredData {
+  // The block's dialect: json-ld, microdata, opengraph, rdfa.
+  string kind = 1;
+  string json = 2;
+}
+
+// MediaMeta describes the media stream a transcript came from.
+message MediaMeta {
+  optional double duration_ms = 1;
+  // Distinct speaker labels, in first-appearance order.
+  repeated string speakers = 2;
+  optional string codec = 3;
+}
+
+// GenerationSource attributes model-generated content to its generation.
+message GenerationSource {
+  string model = 1;
+  optional string endpoint = 2;
+  // The provider's stop reason, verbatim; a length stop means the content
+  // is truncated.
+  optional string finish_reason = 3;
+  optional uint64 prompt_tokens = 4;
+  optional uint64 completion_tokens = 5;
+  optional double temperature = 6;
+}
+
+// OutlineEntry is one row of the source's own table of contents.
+message OutlineEntry {
+  string title = 1;
+  int32 level = 2;
+  optional int32 page_no = 3;
+  // The item or destination the entry points at, when resolvable.
+  optional FineRef target = 4;
+}
+
+// ChangeRecord is one tracked change the source records.
+message ChangeRecord {
+  // Stable id within the document, as the source names it.
+  string id = 1;
+  // The change kind in the source's own vocabulary (insert, delete,
+  // format), lower-cased.
+  string kind = 2;
+  string author = 3;
+  // The change instant; the _raw twin keeps the source's spelling and is
+  // the only field set when it does not parse.
+  optional google.protobuf.Timestamp timestamp = 4;
+  // The item and span the change touches.
+  optional FineRef target = 5;
+  // The text the change removed or replaced, when the source keeps it.
+  optional string content = 6;
+  optional string timestamp_raw = 7;
+}
+
+// NamedAnchor is one named position the source declares.
+message NamedAnchor {
+  string name = 1;
+  FineRef target = 2;
+}
+
+// ValueRange is one literal or literal range in a value condition; the
+// bounds are the source's own literals.
+message ValueRange {
+  string low = 1;
+  optional string high = 2;
+}
+
+// ValueCondition is one named value condition a column declares.
+message ValueCondition {
+  string name = 1;
+  repeated ValueRange values = 2;
+}
+
+// EmailParty is one addressee, split as the source states it.
+message EmailParty {
+  optional string name = 1;
+  string address = 2;
+}
+
+// EmailMeta is the typed message envelope of a mail source.
+message EmailMeta {
+  repeated EmailParty from = 1;
+  repeated EmailParty to = 2;
+  repeated EmailParty cc = 3;
+  repeated EmailParty bcc = 4;
+  optional string message_id = 5;
+  // Every id the reply header names, individually.
+  repeated string in_reply_to = 6;
+  // Every id from every References header instance, in order.
+  repeated string references = 7;
+  optional string conversation_topic = 8;
+  // The source's conversation index, verbatim bytes.
+  optional bytes conversation_index = 9;
+  // The sent instant; the _raw twin keeps the source's spelling and is the
+  // only field set when it does not parse.
+  optional google.protobuf.Timestamp sent = 10;
+  optional string sent_raw = 11;
+}
+
+// RecordLayoutMeta describes the fixed-record layout a table was decoded
+// with.
+message RecordLayoutMeta {
+  // The source byte encoding (an EBCDIC code page name).
+  optional string encoding = 1;
+  optional uint64 record_length = 2;
+  optional uint64 header_bytes = 3;
+  optional uint64 footer_bytes = 4;
+  optional uint64 prefix_bytes = 5;
+  // Rows the producer's row cap dropped; zero means the table is complete.
+  optional uint64 rows_truncated = 6;
+}
+
+// BarcodeAnnotation is one decoded machine-readable code payload.
+message BarcodeAnnotation {
+  // The symbology name as the decoder reports it (QRCode, Code128).
+  string format = 1;
+  // The decoded content.
+  string value = 2;
+  // The decoding engine.
+  string provenance = 3;
 }
