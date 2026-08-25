@@ -543,15 +543,15 @@ std::string completion(const std::string& content_json, const std::string& extra
 
 void verify_client_adversarial(ScriptVlm* fake) {
     // Malformed logprobs: tokens that are not objects, objects without a
-    // logprob, non-numeric logprobs. The one valid token sets confidence.
+    // logprob, non-numeric logprobs. The one valid token sets the mean.
     // (Walking these with const json::operator[] is undefined behavior.)
     fake->script = {{200, completion("\"text\"",
                                      ",\"logprobs\":{\"content\":[{\"token\":\"a\"},\"oops\","
                                      "{\"logprob\":-0.5},{\"logprob\":\"high\"}]}")}};
     vlm::VlmResult result = vlm::generate(call_to(fake->endpoint()));
     require(result.ok, "malformed logprobs do not fail the page: " + result.error);
-    require(result.has_confidence && std::fabs(result.confidence - std::exp(-0.5)) < 1e-9,
-            "confidence from the one valid logprob");
+    require(result.has_logprobs && std::fabs(result.mean_logprob + 0.5) < 1e-9,
+            "mean logprob from the one valid logprob");
 
     // Structural garbage: empty choices, content as an array, an error
     // body with a 200. All clean failures, no crashes.
@@ -579,18 +579,19 @@ void verify_client_adversarial(ScriptVlm* fake) {
     result = vlm::generate(call_to(fake->endpoint() + "/"));
     require(result.ok, "trailing-slash endpoint resolves: " + result.error);
 
-    // Confidence stays a probability: positive (garbage) logprobs clamp to
-    // 1.0, hugely negative ones floor at 0.0.
+    // The raw score is reported as given, not laundered: positive
+    // (garbage) logprobs are not clamped away and extreme ones are not
+    // collapsed. A clamp would hide an endpoint reporting nonsense.
     fake->script = {{200, completion("\"text\"", ",\"logprobs\":{\"content\":["
                                                  "{\"logprob\":3.0},{\"logprob\":2.0}]}")}};
     result = vlm::generate(call_to(fake->endpoint()));
-    require(result.ok && result.has_confidence && result.confidence == 1.0,
-            "positive logprobs clamp confidence to 1.0");
+    require(result.ok && result.has_logprobs && std::fabs(result.mean_logprob - 2.5) < 1e-9,
+            "impossible positive logprobs survive as the raw mean");
     fake->script = {{200, completion("\"text\"", ",\"logprobs\":{\"content\":["
                                                  "{\"logprob\":-1e300}]}")}};
     result = vlm::generate(call_to(fake->endpoint()));
-    require(result.ok && result.has_confidence && result.confidence == 0.0,
-            "hugely negative logprobs floor confidence at 0.0");
+    require(result.ok && result.has_logprobs && result.mean_logprob == -1e300,
+            "an extreme logprob is not floored");
 }
 
 // ---------------------------------------------------------------------------

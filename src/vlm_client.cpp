@@ -1,9 +1,7 @@
 #include "vlm_client.h"
 
-#include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <cmath>
 #include <thread>
 
 #include <httplib.h>
@@ -195,9 +193,11 @@ VlmResult generate(const VlmCall& call) {
         }
     }
 
-    // Logprobs are optional (Docling's OpenAI VLM logprobs knob). Mean
-    // token probability becomes the CollectorSource confidence; absent
-    // means skipped silently.
+    // Logprobs are optional. The mean token log-probability is kept as
+    // the endpoint reported it: not exponentiated, not clamped. Rescaling
+    // it into a probability destroys the only signal it carries, and
+    // clamping hides an endpoint that reports nonsense. Absent means
+    // skipped silently.
     const auto& first = choices[0];
     if (first.contains("logprobs") && first["logprobs"].is_object() &&
         first["logprobs"].contains("content")) {
@@ -220,11 +220,8 @@ VlmResult generate(const VlmCall& call) {
                 }
             }
             if (count > 0) {
-                result.has_confidence = true;
-                // Positive logprobs are endpoint garbage; keep the
-                // probability in [0, 1] anyway.
-                result.confidence =
-                    std::min(1.0, std::exp(sum / static_cast<double>(count)));
+                result.has_logprobs = true;
+                result.mean_logprob = sum / static_cast<double>(count);
             }
         }
     }

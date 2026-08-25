@@ -172,8 +172,17 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
                 // the queue twice (once on the image, once on the call).
                 job.call.png = std::move(*job.image.mutable_png());
                 VlmResult result = generate(job.call);
-                if (result.has_confidence) {
-                    page.source.set_confidence(result.confidence);
+                if (result.has_logprobs) {
+                    // The response's mean token log-probability is a
+                    // page-wide statistic. It rides the source as the raw
+                    // uncalibrated score it is, with its kind naming the
+                    // statistic and its scope, and never as `confidence`:
+                    // one number copied onto every item would report a
+                    // crisp heading and a hallucinated table as equally
+                    // trustworthy. Per-item confidence needs per-item
+                    // token spans, which the response does not carry.
+                    page.source.set_raw_score(result.mean_logprob);
+                    page.source.set_raw_score_kind("page_mean_token_logprob");
                 }
                 // Generation provenance rides every item next to the
                 // collector source: the model that actually answered (not

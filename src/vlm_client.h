@@ -35,10 +35,13 @@ struct VlmResult {
     std::string text;
     // Failure detail when !ok.
     std::string error;
-    // Mean token probability from logprobs when the endpoint reported
-    // them; has_confidence is false when absent (skipped silently).
-    bool has_confidence = false;
-    double confidence = 0.0;
+    // Mean token log-probability over the whole response, verbatim and
+    // unrescaled, when the endpoint reported logprobs; has_logprobs is
+    // false when it did not (skipped silently). It is a page-wide
+    // statistic, never a per-item one, and it is not exponentiated here:
+    // a probability is a claim the response does not support.
+    bool has_logprobs = false;
+    double mean_logprob = 0.0;
     // The endpoint's stop reason, verbatim ("stop", "length",
     // "content_filter", ...); empty when it reported none. A "length" stop
     // means the answer was cut at max_tokens and the page is short.

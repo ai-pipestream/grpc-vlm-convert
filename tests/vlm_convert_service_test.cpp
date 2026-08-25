@@ -7,6 +7,7 @@
 #include <grpcpp/grpcpp.h>
 
 #include <atomic>
+#include <cmath>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -277,8 +278,16 @@ void verify_streaming_and_failure_isolation(const std::shared_ptr<grpc::Channel>
                 "preset model tagged");
         require(!base.source(0).collector().version().empty(),
                 "the collector stamps its own version");
-        require(base.source(0).collector().has_confidence(),
-                "logprobs become CollectorSource confidence");
+        // The page-mean logprob is a raw score with its kind named, not a
+        // per-item confidence claim: the same number on every item of the
+        // page would say a heading and a hallucination scored alike.
+        require(!base.source(0).collector().has_confidence(),
+                "no per-item confidence is claimed from a page-wide mean");
+        require(base.source(0).collector().has_raw_score() &&
+                    std::fabs(base.source(0).collector().raw_score() + 0.15) < 1e-9,
+                "the raw mean token logprob rides the source unrescaled");
+        require(base.source(0).collector().raw_score_kind() == "page_mean_token_logprob",
+                "the raw score names its statistic and its scope");
         // Generation provenance next to the collector source: the item
         // says which model answered, from where, how the answer stopped,
         // and what it cost.

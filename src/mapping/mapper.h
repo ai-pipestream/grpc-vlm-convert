@@ -22,7 +22,8 @@ struct PageContext {
     // mappers/tests that have no image.
     std::string png;
     // Collector attribution stamped on every item ("vlm-convert", the
-    // model name, optional confidence from endpoint logprobs).
+    // model name, this server's version, and the page's raw model score
+    // when the endpoint reported logprobs).
     docv1::CollectorSource source;
     // The model invocation that produced this page: which model answered,
     // from which endpoint, how the generation stopped, what it cost. Rides
