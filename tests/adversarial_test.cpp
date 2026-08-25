@@ -455,6 +455,46 @@ void verify_html_adversarial() {
                                    &error),
             "mixed-case table maps: " + error);
     require(doc.tables_size() == 1, "<Table> is a table, not a paragraph");
+    require(doc.tables(0).data().grid(0).cells(0).text() == "x",
+            "a mixed-case table still yields its cell");
+    doc.Clear();
+
+    // Ragged rows still produce a rectangular grid; the padding cells are
+    // grid filler, not source cells.
+    require(vlm::mapping::map_html(
+                "<table><tr><td>a</td><td>b</td></tr><tr><td>c</td></tr></table>",
+                page_context(), &doc, &error),
+            "ragged table maps: " + error);
+    require(doc.tables(0).data().num_rows() == 2 && doc.tables(0).data().num_cols() == 2,
+            "the widest row sets the column count");
+    require(doc.tables(0).data().grid(1).cells_size() == 2 &&
+                doc.tables(0).data().grid(1).cells(1).text().empty(),
+            "the short row is padded");
+    require(doc.tables(0).data().table_cells_size() == 3, "padding is not a source cell");
+    doc.Clear();
+
+    // Cells with no <tr> around them are read as one row rather than lost.
+    require(vlm::mapping::map_html("<table><td>lone</td><td>pair</td></table>", page_context(),
+                                   &doc, &error),
+            "row-less cells map: " + error);
+    require(doc.tables(0).data().num_rows() == 1 && doc.tables(0).data().num_cols() == 2,
+            "row-less cells become a single row");
+    doc.Clear();
+
+    // Markup a table parser cannot find cells in keeps its text instead of
+    // shipping an empty box.
+    require(vlm::mapping::map_html("<table>loose text</table>", page_context(), &doc, &error),
+            "cell-less table maps: " + error);
+    require(doc.tables(0).data().num_rows() == 1 &&
+                doc.tables(0).data().grid(0).cells(0).text() == "loose text",
+            "a cell-less table keeps its body as one cell");
+    doc.Clear();
+
+    // An empty table is still an item, and still carries no invented data.
+    require(vlm::mapping::map_html("<table></table>", page_context(), &doc, &error),
+            "empty table maps: " + error);
+    require(doc.tables_size() == 1 && doc.tables(0).data().num_rows() == 0,
+            "an empty table invents no rows");
     doc.Clear();
     require(vlm::mapping::map_html("<Pre>code</Pre>", page_context(), &doc, &error),
             "mixed-case pre maps: " + error);

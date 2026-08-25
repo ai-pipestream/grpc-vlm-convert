@@ -6,6 +6,7 @@
 
 #include "mapper.h"
 
+#include <algorithm>
 #include <vector>
 
 namespace vlm::mapping {
@@ -145,6 +146,44 @@ inline docv1::TableItem* add_table(docv1::Document* doc, const PageContext& page
     *table->add_prov() = prov;
     add_sources(table->mutable_source(), page);
     return table;
+}
+
+// Fills a TableData from rows of already-split cell text: a rectangular
+// grid of 1x1 cells, `table_cells` mirroring the grid, and the first
+// `header_rows` rows flagged as column headers. Ragged source rows still
+// produce a rectangular grid (the grid invariant): short rows pad with
+// empty 1x1 cells up to the widest row. Shared by every mapper whose
+// source gives it rows and cells but no spans.
+inline void fill_table_data(docv1::TableData* data,
+                            const std::vector<std::vector<std::string>>& rows,
+                            size_t header_rows) {
+    size_t num_cols = 0;
+    for (const std::vector<std::string>& row : rows) {
+        num_cols = std::max(num_cols, row.size());
+    }
+    data->set_num_rows(static_cast<int32_t>(rows.size()));
+    data->set_num_cols(static_cast<int32_t>(num_cols));
+    for (size_t r = 0; r < rows.size(); r++) {
+        docv1::TableRow* grid_row = data->add_grid();
+        for (size_t c = 0; c < num_cols; c++) {
+            docv1::TableCell cell;
+            if (c < rows[r].size()) {
+                cell.set_text(rows[r][c]);
+                cell.set_column_header(r < header_rows);
+            }
+            cell.set_row_span(1);
+            cell.set_col_span(1);
+            cell.set_start_row_offset_idx(static_cast<int32_t>(r));
+            cell.set_end_row_offset_idx(static_cast<int32_t>(r + 1));
+            cell.set_start_col_offset_idx(static_cast<int32_t>(c));
+            cell.set_end_col_offset_idx(static_cast<int32_t>(c + 1));
+            *grid_row->add_cells() = cell;
+            // Padding cells fill the grid only; they are not source cells.
+            if (c < rows[r].size()) {
+                *data->add_table_cells() = cell;
+            }
+        }
+    }
 }
 
 namespace internal {

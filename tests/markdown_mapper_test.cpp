@@ -130,6 +130,36 @@ void verify_plaintext_and_html() {
     require(html_doc.texts(2).has_list_item(), "li is a list item");
 }
 
+// An HTML table used to ship as a TableItem with no TableData at all: an
+// empty box where a table was. The rows and cells the model wrote are the
+// table.
+void verify_html_table() {
+    const std::string text =
+        "<p>Inventory:</p>\n"
+        "<table>\n"
+        "  <thead><tr><th>Name</th><th>Qty</th></tr></thead>\n"
+        "  <tbody>\n"
+        "    <tr><td>bolts</td><td>12</td></tr>\n"
+        "    <tr><td>nuts</td><td>30</td></tr>\n"
+        "  </tbody>\n"
+        "</table>\n";
+    docv1::Document doc;
+    std::string error;
+    require(vlm::mapping::map_html(text, page_context(), &doc, &error),
+            "html table maps: " + error);
+    require(doc.tables_size() == 1, "one table item");
+    const docv1::TableData& data = doc.tables(0).data();
+    require(data.num_rows() == 3 && data.num_cols() == 2, "header row plus two data rows");
+    require(data.grid(0).cells(0).text() == "Name" && data.grid(0).cells(1).text() == "Qty",
+            "header cell text");
+    require(data.grid(0).cells(0).column_header(), "an all-th row is a header row");
+    require(!data.grid(1).cells(0).column_header(), "td rows are not headers");
+    require(data.grid(2).cells(1).text() == "30", "last cell text");
+    require(data.table_cells_size() == 6, "every source cell is in table_cells");
+    require(doc.tables(0).prov(0).bbox().r() == 612,
+            "html tables keep the full-page box, never invented boxes");
+}
+
 }  // namespace
 
 int main() {
@@ -138,6 +168,7 @@ int main() {
         verify_pipe_table();
         verify_mapping_failure();
         verify_plaintext_and_html();
+        verify_html_table();
     } catch (const std::exception& error) {
         std::println(stderr, "{}", error.what());
         return 1;

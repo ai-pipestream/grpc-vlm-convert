@@ -85,9 +85,20 @@ only the `{"options", "pages"}` envelope.
 |---|---|
 | DocTags | first-class: locations become `BoundingBox` `TOPLEFT`, tags become labels (`#/texts`, tables, pictures) |
 | Markdown | `Markdown` declarative mapper (headings, lists, fenced code, pipe tables) + page bbox = full page |
-| HTML | HTML collector on the snippet |
+| HTML | block-level snippet mapper (headings, paragraphs, list items, code, tables with real `TableData`) + page bbox = full page |
 | OTSL | table-shaped items |
 | Plaintext | one `TextItem` per page |
+
+### HTML mapping rules
+
+Block matching spans newlines, since model output wraps its markup. A
+`<table>` carries real `TableData`: `<tr>` rows of `<th>`/`<td>` cells,
+1x1, ragged rows padded to a rectangular grid (padding is grid filler
+only, never a source cell), and the leading run of all-`<th>` rows
+flagged as column headers. Cells written without a surrounding `<tr>`
+read as one row; markup with no cells at all keeps its stripped text as
+a single cell. Spans (`rowspan` / `colspan`) are not read — that is the
+HTML collector's job upstream.
 
 ### DocTags mapping rules
 

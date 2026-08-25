@@ -55,47 +55,15 @@ std::vector<std::string> split_pipe_row(const std::string& line) {
 void emit_pipe_table(const std::vector<std::string>& lines, const PageContext& page,
                      docv1::Document* doc) {
     docv1::TableItem* table = add_table(doc, page, page_prov(page));
-    docv1::TableData* data = table->mutable_data();
-    size_t header_rows = lines.size() > 1 && is_separator_row(lines[1]) ? 1 : 0;
-    size_t num_cols = 0;
+    const size_t header_rows = lines.size() > 1 && is_separator_row(lines[1]) ? 1 : 0;
     std::vector<std::vector<std::string>> rows;
     for (size_t i = 0; i < lines.size(); i++) {
         if (header_rows == 1 && i == 1) {
             continue;  // the separator row itself
         }
-        std::vector<std::string> cells = split_pipe_row(lines[i]);
-        num_cols = std::max(num_cols, cells.size());
-        rows.push_back(std::move(cells));
+        rows.push_back(split_pipe_row(lines[i]));
     }
-    data->set_num_rows(static_cast<int32_t>(rows.size()));
-    data->set_num_cols(static_cast<int32_t>(num_cols));
-    for (size_t r = 0; r < rows.size(); r++) {
-        docv1::TableRow* grid_row = data->add_grid();
-        for (size_t c = 0; c < rows[r].size(); c++) {
-            docv1::TableCell cell;
-            cell.set_text(rows[r][c]);
-            cell.set_column_header(header_rows == 1 && r == 0);
-            cell.set_row_span(1);
-            cell.set_col_span(1);
-            cell.set_start_row_offset_idx(static_cast<int32_t>(r));
-            cell.set_end_row_offset_idx(static_cast<int32_t>(r + 1));
-            cell.set_start_col_offset_idx(static_cast<int32_t>(c));
-            cell.set_end_col_offset_idx(static_cast<int32_t>(c + 1));
-            *grid_row->add_cells() = cell;
-            *data->add_table_cells() = cell;
-        }
-        // Ragged source rows still produce a rectangular grid (docling's
-        // grid invariant): pad with empty 1x1 cells up to num_cols.
-        for (size_t c = rows[r].size(); c < num_cols; c++) {
-            docv1::TableCell* empty = grid_row->add_cells();
-            empty->set_row_span(1);
-            empty->set_col_span(1);
-            empty->set_start_row_offset_idx(static_cast<int32_t>(r));
-            empty->set_end_row_offset_idx(static_cast<int32_t>(r + 1));
-            empty->set_start_col_offset_idx(static_cast<int32_t>(c));
-            empty->set_end_col_offset_idx(static_cast<int32_t>(c + 1));
-        }
-    }
+    fill_table_data(table->mutable_data(), rows, header_rows);
 }
 
 }  // namespace
