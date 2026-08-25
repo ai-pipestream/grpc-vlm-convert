@@ -42,6 +42,9 @@ struct VlmResult {
     // a probability is a claim the response does not support.
     bool has_logprobs = false;
     double mean_logprob = 0.0;
+    // How many tokens the mean was taken over, so a three-token page and a
+    // three-thousand-token page stay distinguishable.
+    uint64_t scored_tokens = 0;
     // The endpoint's stop reason, verbatim ("stop", "length",
     // "content_filter", ...); empty when it reported none. A "length" stop
     // means the answer was cut at max_tokens and the page is short.

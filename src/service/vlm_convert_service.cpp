@@ -183,6 +183,7 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
                     // token spans, which the response does not carry.
                     page.source.set_raw_score(result.mean_logprob);
                     page.source.set_raw_score_kind("page_mean_token_logprob");
+                    page.source.set_raw_score_samples(result.scored_tokens);
                 }
                 // Generation provenance rides every item next to the
                 // collector source: the model that actually answered (not

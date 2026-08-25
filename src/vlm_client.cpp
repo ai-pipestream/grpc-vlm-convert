@@ -222,6 +222,7 @@ VlmResult generate(const VlmCall& call) {
             if (count > 0) {
                 result.has_logprobs = true;
                 result.mean_logprob = sum / static_cast<double>(count);
+                result.scored_tokens = count;
             }
         }
     }

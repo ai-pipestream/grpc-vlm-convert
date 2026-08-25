@@ -592,6 +592,8 @@ void verify_client_adversarial(ScriptVlm* fake) {
     require(result.ok, "malformed logprobs do not fail the page: " + result.error);
     require(result.has_logprobs && std::fabs(result.mean_logprob + 0.5) < 1e-9,
             "mean logprob from the one valid logprob");
+    require(result.scored_tokens == 1,
+            "the sample count counts scored tokens, not skipped entries");
 
     // Structural garbage: empty choices, content as an array, an error
     // body with a 200. All clean failures, no crashes.

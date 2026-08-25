@@ -164,18 +164,18 @@ still yields the PictureItem, just without an image.
 
 Logprobs: if the VLM endpoint returns them, the mean token
 log-probability over the response rides the `CollectorSource` as
-`raw_score` with `raw_score_kind` `page_mean_token_logprob`. Skip
-silently when absent.
+`raw_score` with `raw_score_kind` `page_mean_token_logprob` and
+`raw_score_samples` set to the number of tokens the mean was taken
+over. Skip silently when absent.
 
 It is deliberately not `confidence`. The mean is computed over the whole
 page, so stamping it as a per-item confidence reports a crisp heading
 and a hallucinated table as equally trustworthy; the kind names both the
 statistic and its scope so no consumer mistakes it for a probability. It
 is also neither exponentiated nor clamped: rescaling destroys the signal
-and clamping hides an endpoint reporting nonsense. The token count
-behind the mean is visible as `GenerationSource.completion_tokens`. A
-real per-item confidence needs per-item token spans, which the response
-does not carry.
+and clamping hides an endpoint reporting nonsense. A real per-item
+confidence needs per-item token spans, which the response does not
+carry.
 
 ### Generation provenance
 

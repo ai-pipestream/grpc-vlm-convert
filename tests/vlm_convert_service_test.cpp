@@ -288,6 +288,8 @@ void verify_streaming_and_failure_isolation(const std::shared_ptr<grpc::Channel>
                 "the raw mean token logprob rides the source unrescaled");
         require(base.source(0).collector().raw_score_kind() == "page_mean_token_logprob",
                 "the raw score names its statistic and its scope");
+        require(base.source(0).collector().raw_score_samples() == 2,
+                "the sample count says how many tokens the mean covers");
         // Generation provenance next to the collector source: the item
         // says which model answered, from where, how the answer stopped,
         // and what it cost.
