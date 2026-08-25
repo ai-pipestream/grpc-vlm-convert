@@ -20,6 +20,60 @@ vlm::mapping::PageContext page_context() {
     return page;
 }
 
+// Generation provenance is stamped by the item builders, so it must reach
+// every item kind that has a source list, not only the text items the
+// service test walks.
+void verify_generation_source_on_every_item() {
+    vlm::mapping::PageContext page = page_context();
+    page.has_generation = true;
+    page.generation.set_model("served-model");
+    page.generation.set_endpoint("http://vlm:8080");
+    page.generation.set_finish_reason("length");
+    page.generation.set_completion_tokens(4096);
+
+    const std::string text =
+        "<doctag>"
+        "<text><loc_50><loc_200><loc_400><loc_260>Body text.</text>"
+        "<picture><loc_100><loc_100><loc_300><loc_300><logo></picture>"
+        "<otsl><loc_10><loc_10><loc_400><loc_400><fcel>a<fcel>b<nl></otsl>"
+        "<key_value_region><loc_10><loc_10><loc_400><loc_400>"
+        "<key_0><loc_10><loc_10><loc_100><loc_40>Name</key_0>"
+        "<value_0><loc_110><loc_10><loc_300><loc_40>Ada</value_0>"
+        "</key_value_region>"
+        "</doctag>";
+    docv1::Document doc;
+    std::string error;
+    require(vlm::mapping::map_doctags(text, page, &doc, &error),
+            "mixed page maps: " + error);
+
+    auto check = [](const google::protobuf::RepeatedPtrField<docv1::SourceType>& sources,
+                    const std::string& what) {
+        require(sources.size() == 2, what + " carries both sources");
+        require(sources.Get(0).has_collector(), what + " keeps its collector source");
+        require(sources.Get(1).has_generation(), what + " gains a generation source");
+        require(sources.Get(1).generation().model() == "served-model" &&
+                    sources.Get(1).generation().endpoint() == "http://vlm:8080" &&
+                    sources.Get(1).generation().finish_reason() == "length" &&
+                    sources.Get(1).generation().completion_tokens() == 4096,
+                what + " carries the generation facts");
+    };
+    require(doc.texts_size() == 1 && doc.pictures_size() == 1 && doc.tables_size() == 1 &&
+                doc.key_value_items_size() == 1,
+            "one item of each kind");
+    check(doc.texts(0).text().base().source(), "a text item");
+    check(doc.pictures(0).source(), "a picture item");
+    check(doc.tables(0).source(), "a table item");
+    check(doc.key_value_items(0).source(), "a key-value item");
+
+    // A page with no generation to attribute stamps the collector alone
+    // rather than an empty shell.
+    docv1::Document plain;
+    require(vlm::mapping::map_doctags(text, page_context(), &plain, &error),
+            "mixed page maps without a generation: " + error);
+    require(plain.texts(0).text().base().source_size() == 1,
+            "no generation means no generation source");
+}
+
 void verify_heading_paragraph_boxes() {
     const std::string text =
         "<doctag>"
@@ -590,6 +644,7 @@ void verify_inline_group() {
 
 int main() {
     try {
+        verify_generation_source_on_every_item();
         verify_heading_paragraph_boxes();
         verify_table_picture_furniture();
         verify_unclosed_and_unknown_tags();
