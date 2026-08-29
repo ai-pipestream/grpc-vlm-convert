@@ -1,0 +1,31 @@
+# One service per accelerator; bring up exactly one:
+#   docker compose -f compose.yaml --profile cuda up -d --build
+#   docker compose -f compose.yaml --profile xpu  up -d --build   (Intel Arc / Battlemage host)
+#   docker compose -f compose.yaml --profile cpu  up -d --build
+# Weights (about 5 GB) download once into the hf-cache volume.
+services:
+  north-cuda:
+    profiles: [cuda]
+    build: { context: ., dockerfile: Dockerfile.cuda }
+    image: pipestreamai/north-micro-vision:cuda
+    ports: ["8086:8080"]
+    volumes: [hf-cache:/hf]
+    gpus: all
+    restart: unless-stopped
+  north-xpu:
+    profiles: [xpu]
+    build: { context: ., dockerfile: Dockerfile.xpu }
+    image: pipestreamai/north-micro-vision:xpu
+    ports: ["8086:8080"]
+    volumes: [hf-cache:/hf]
+    devices: ["/dev/dri:/dev/dri"]
+    restart: unless-stopped
+  north-cpu:
+    profiles: [cpu]
+    build: { context: ., dockerfile: Dockerfile.cpu }
+    image: pipestreamai/north-micro-vision:cpu
+    ports: ["8086:8080"]
+    volumes: [hf-cache:/hf]
+    restart: unless-stopped
+volumes:
+  hf-cache:

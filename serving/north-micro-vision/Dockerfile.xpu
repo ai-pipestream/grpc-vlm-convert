@@ -1,0 +1,26 @@
+# Intel Arc / Battlemage. The base is the llama.cpp Intel server image:
+# Ubuntu 24.04 with the current Intel GPU compute runtime (libze-intel-gpu1
+# 26.x, oneAPI 2025.3), which is what initializes against the host's xe
+# driver. Intel's own IPEX images carry a 2025 driver that reports
+# ZE_RESULT_ERROR_UNINITIALIZED on this hardware. torch comes from the
+# PyTorch XPU wheel index and brings its oneAPI runtime pieces via pip.
+FROM ghcr.io/ggml-org/llama.cpp:server-intel
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /srv
+RUN python3 -m venv /venv && /venv/bin/pip install --no-cache-dir \
+    torch==2.9.1 torchvision --index-url https://download.pytorch.org/whl/xpu
+COPY requirements.txt .
+RUN /venv/bin/pip install --no-cache-dir -r requirements.txt
+COPY server.py .
+# The base image's oneAPI environment must not shadow the runtime torch
+# ships: its loader is a different version and torch's libsycl fails to
+# resolve against it. Only the GPU driver in the system library path is
+# wanted from the base, and that needs no environment.
+ENV NORTH_DEVICE=xpu HF_HOME=/hf PATH=/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    LD_LIBRARY_PATH= LIBRARY_PATH= CPATH= ONEAPI_ROOT= CMPLR_ROOT= SYCL_CACHE_PERSISTENT=1
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=5s --start-period=600s CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health').status==200 else 1)"
+ENTRYPOINT []
+CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]

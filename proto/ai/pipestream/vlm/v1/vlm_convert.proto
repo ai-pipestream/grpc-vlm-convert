@@ -126,6 +126,9 @@ enum VlmPreset {
   // Open vocabulary: preset_raw carries the endpoint's model name
   // (Unlimited-OCR, Dolphin, Chandra, dots.ocr, ...).
   VLM_PRESET_RAW = 9;
+  // Cohere Labs North Micro Vision Instruct (2.4B, Apache 2.0), the open
+  // base of Cohere's document parser; markdown output.
+  VLM_PRESET_NORTH_MICRO_VISION = 10;
 }
 
 // Model response formats this service can map into Document items.

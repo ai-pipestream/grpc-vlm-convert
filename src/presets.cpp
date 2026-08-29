@@ -28,6 +28,14 @@ const std::vector<PresetSpec> kPresets = {
      "Convert this page to markdown.", vlmv1::RESPONSE_FORMAT_MARKDOWN, {}, 4096},
     {vlmv1::VLM_PRESET_LIGHTON_OCR, "lighton-ocr", "lightonai/LightOnOCR-1B",
      "Convert this page to markdown.", vlmv1::RESPONSE_FORMAT_MARKDOWN, {}, 4096},
+    // A general VLM rather than an OCR fine-tune, so the prompt says what
+    // a page conversion must keep; its multimodal context is 8k tokens.
+    {vlmv1::VLM_PRESET_NORTH_MICRO_VISION, "north-micro-vision",
+     "CohereLabs/North-Micro-Vision-Instruct",
+     "Convert this page to markdown. Keep the reading order, every heading, "
+     "paragraph, list and table (tables as markdown tables), and transcribe "
+     "the text exactly; do not summarize or describe.",
+     vlmv1::RESPONSE_FORMAT_MARKDOWN, {}, 8192},
 };
 
 }  // namespace
