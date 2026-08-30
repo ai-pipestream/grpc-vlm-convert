@@ -169,6 +169,19 @@ def load() -> None:
     engine = Engine()
 
 
+@app.get("/")
+def root() -> dict[str, Any]:
+    # A browser landing on the bare host should learn what this is and where
+    # the real endpoints are, not get a bare 404.
+    return {
+        "service": "north-micro-vision",
+        "model": MODEL_ID,
+        "status": "ok" if engine is not None else "loading",
+        "device": str(engine.device) if engine is not None else None,
+        "endpoints": ["/health", "/v1/models", "/v1/chat/completions"],
+    }
+
+
 @app.get("/health")
 def health() -> dict[str, Any]:
     if engine is None:
