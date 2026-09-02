@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.26
+# syntax=docker/dockerfile:1.27
 # grpc-vlm-convert — CPU-only image. The VLM itself is a separate server;
 # this process is a mapper + HTTP client, so the runtime needs no GPU and
 # no model mount.
