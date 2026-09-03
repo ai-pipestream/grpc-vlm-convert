@@ -11,8 +11,15 @@ namespace vlm::mapping {
 namespace {
 
 std::string strip_tags(const std::string& html) {
+    // A line break is whitespace, not nothing: stripping <br> bare fuses
+    // the words around it ("Hello<br/>World" -> "HelloWorld"). Replace it
+    // with a space before the generic tag strip, like docling's
+    // chandra_utils._strip_tags — lowercase only, so <BR> still strips
+    // bare.
+    static const std::regex kBreak("<br\\s*/?>");
+    const std::string spaced = std::regex_replace(html, kBreak, " ");
     static const std::regex kTag("<[^>]*>");
-    std::string text = std::regex_replace(html, kTag, "");
+    std::string text = std::regex_replace(spaced, kTag, "");
     // The handful of entities VLM output actually carries.
     static const std::pair<const char*, const char*> kEntities[] = {
         {"&amp;", "&"}, {"&lt;", "<"}, {"&gt;", ">"},
@@ -26,7 +33,11 @@ std::string strip_tags(const std::string& html) {
             pos += 1;
         }
     }
-    return trim(text);
+    // Collapse whitespace runs to one space, then trim (docling ends with
+    // re.sub(r"\s+", " ", ...).strip()); after the entity pass so &nbsp;
+    // participates.
+    static const std::regex kWhitespace("\\s+");
+    return trim(std::regex_replace(text, kWhitespace, " "));
 }
 
 // Rows and cells of a table body, in source order. A row whose cells are

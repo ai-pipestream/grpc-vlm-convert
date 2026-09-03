@@ -100,6 +100,13 @@ read as one row; markup with no cells at all keeps its stripped text as
 a single cell. Spans (`rowspan` / `colspan`) are not read — that is the
 HTML collector's job upstream.
 
+Text extraction from a block or cell follows docling's
+`chandra_utils._strip_tags`: a lowercase `<br>`, `<br/>` or `<br />`
+becomes a single space *before* the generic tag strip (stripping it
+bare would fuse the words around it), the remaining tags come off, the
+six supported entities unescape, and whitespace runs collapse to one
+space with the edges trimmed.
+
 ### DocTags mapping rules
 
 Items emit in raw token order and body children refs follow it: no

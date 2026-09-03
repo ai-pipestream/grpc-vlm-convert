@@ -518,6 +518,35 @@ void verify_html_adversarial() {
             "entities map: " + error);
     require(doc.texts(0).text().base().text() == "it's &copy; acme",
             "&#39; unescapes, &copy; stays literal");
+
+    // A line break is whitespace, not nothing (docling
+    // chandra_utils._strip_tags parity): <br>, <br/> and <br /> all become
+    // a single space before the generic tag strip, so the words around
+    // them never fuse.
+    doc.Clear();
+    require(vlm::mapping::map_html("<p>Hello<br/>World</p>", page_context(), &doc, &error),
+            "br paragraph maps: " + error);
+    require(doc.texts(0).text().base().text() == "Hello World",
+            "<br/> is a word separator: " + doc.texts(0).text().base().text());
+    doc.Clear();
+    require(vlm::mapping::map_html("<p>a<br>b<br />c</p>", page_context(), &doc, &error),
+            "br variants map: " + error);
+    require(doc.texts(0).text().base().text() == "a b c",
+            "<br> and <br /> separate too: " + doc.texts(0).text().base().text());
+
+    // Lowercase only, like docling: <BR> is not a break and strips bare.
+    doc.Clear();
+    require(vlm::mapping::map_html("<p>x<BR>y</p>", page_context(), &doc, &error),
+            "uppercase BR maps: " + error);
+    require(doc.texts(0).text().base().text() == "xy", "<BR> strips bare");
+
+    // Whitespace runs collapse to one space after the strip, in cells too.
+    doc.Clear();
+    require(vlm::mapping::map_html("<table><tr><td>a  b<br>c</td></tr></table>", page_context(),
+                                   &doc, &error),
+            "whitespace cell maps: " + error);
+    require(doc.tables(0).data().grid(0).cells(0).text() == "a b c",
+            "cell whitespace collapses: " + doc.tables(0).data().grid(0).cells(0).text());
 }
 
 // ---------------------------------------------------------------------------
