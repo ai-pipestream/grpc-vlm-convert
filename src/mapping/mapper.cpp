@@ -17,16 +17,17 @@ bool map_plaintext(const std::string& text, const PageContext& page, docv1::Docu
 }
 
 bool map_response(vlmv1::ResponseFormat format, const std::string& text,
-                  const PageContext& page, docv1::Document* out, std::string* error) {
+                  const PageContext& page, docv1::Document* out, std::string* error,
+                  std::vector<vlmv1::PageWarning>* warnings) {
     switch (format) {
         case vlmv1::RESPONSE_FORMAT_DOCTAGS:
-            return map_doctags(text, page, out, error);
+            return map_doctags(text, page, out, error, warnings);
         case vlmv1::RESPONSE_FORMAT_MARKDOWN:
-            return map_markdown(text, page, out, error);
+            return map_markdown(text, page, out, error, warnings);
         case vlmv1::RESPONSE_FORMAT_HTML:
-            return map_html(text, page, out, error);
+            return map_html(text, page, out, error, warnings);
         case vlmv1::RESPONSE_FORMAT_OTSL:
-            return map_otsl(text, page, out, error);
+            return map_otsl(text, page, out, error, warnings);
         case vlmv1::RESPONSE_FORMAT_PLAINTEXT:
             return map_plaintext(text, page, out, error);
         default:

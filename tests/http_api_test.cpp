@@ -2,12 +2,12 @@
 // sync /v1/convert happy path (event order, canonical proto3 JSON field
 // names), the 400 error matrix, the async /v1/convert/stream NDJSON
 // per-event flush (a PageDocument line must arrive while the fake VLM
-// still holds back a later page), abort_on_error on both endpoints, and
-// healthz.
+// still holds back a later page), abort_on_error on both endpoints,
+// healthz, the transport body cap, a caller hanging up mid-conversion, and
+// the bearer token.
 
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -64,14 +64,16 @@ struct FakeVlm {
     httplib::Server server;
     std::jthread thread;
     int port = 0;
-    std::mutex hold_mutex;
-    std::condition_variable hold_cv;
-    bool hold_released = false;
+    std::atomic<bool> hold_released{false};
     std::atomic<bool> holding{false};
+    // Calls received, and HOLD pages that saw their caller hang up.
+    std::atomic<long> calls{0};
+    std::atomic<long> held_disconnects{0};
 
     void start() {
         server.Post("/v1/chat/completions", [this](const httplib::Request& request,
                                                    httplib::Response& response) {
+            calls++;
             nlohmann::json body = nlohmann::json::parse(request.body, nullptr, false);
             std::string url = body["messages"][0]["content"][1]["image_url"]["url"];
             const std::string prefix = "data:image/png;base64,";
@@ -79,9 +81,14 @@ struct FakeVlm {
             const std::string png = base64_decode(url.substr(prefix.size()));
 
             if (png.contains("HOLD")) {
+                // Parks until released or until the caller hangs up.
                 holding = true;
-                std::unique_lock<std::mutex> lock(hold_mutex);
-                hold_cv.wait(lock, [&] { return hold_released; });
+                while (!hold_released.load() && !request.is_connection_closed()) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                }
+                if (!hold_released.load()) {
+                    held_disconnects++;
+                }
                 holding = false;
             }
             if (png.contains("FAIL")) {
@@ -106,13 +113,7 @@ struct FakeVlm {
         server.wait_until_ready();
     }
 
-    void release() {
-        {
-            std::lock_guard<std::mutex> lock(hold_mutex);
-            hold_released = true;
-        }
-        hold_cv.notify_all();
-    }
+    void release() { hold_released = true; }
 
     void stop() {
         release();  // never park a held page on the teardown path
@@ -243,6 +244,18 @@ void verify_sync_non_png(httplib::Client& client) {
     require(body["error"]["code"] == "INVALID_ARGUMENT", "non-PNG names INVALID_ARGUMENT");
     require(body["error"]["message"].get<std::string>().contains("PNG"),
             "the message says why");
+}
+
+// An endpoint override without the operator's opt-in is PERMISSION_DENIED,
+// which the error matrix maps to 403.
+void verify_sync_override_refused(httplib::Client& client) {
+    vlmv1::ConvertOptions options;
+    options.set_endpoint("http://127.0.0.1:1");
+    auto result = client.Post("/v1/convert", convert_body(options, {page(1, "PAGE1")}).dump(),
+                              "application/json");
+    require(result && result->status == 403, "a refused override is 403");
+    const nlohmann::json body = nlohmann::json::parse(result->body);
+    require(body["error"]["code"] == "PERMISSION_DENIED", "403 names PERMISSION_DENIED");
 }
 
 // Collects an NDJSON response incrementally; lines() splits what has
@@ -386,18 +399,86 @@ void verify_envelope_shapes(httplib::Client& client) {
             "pageless request reaches the pipeline's no-pages rejection");
 }
 
-// cpp-httplib 0.53 introduced a 100MB default request-body cap (0.20 had
-// none); the gateway removes it so the configurable app-level page caps
-// stay authoritative. A body just over 100MB must reach the JSON parser
-// (400 from the handler), never die at the transport (413).
-void verify_transport_uncapped(httplib::Client& client) {
-    client.set_write_timeout(60, 0);
-    const std::string big(100 * 1024 * 1024 + 1, 'x');
-    auto result = client.Post("/v1/convert", big, "application/json");
-    require(result && result->status == 400, "an over-100MB body reaches the handler");
-    const nlohmann::json body = nlohmann::json::parse(result->body);
-    require(body["error"]["code"] == "INVALID_ARGUMENT",
-            "the oversized body fails as JSON, not as a transport cap");
+// The body is capped at the transport: past http_max_body_bytes httplib
+// answers 413 having read no more than the cap, before the JSON parser or
+// the pipeline holds any of it. A body at the cap still reaches the handler.
+void verify_body_cap(FakeVlm& fake) {
+    vlm::Config config;
+    config.endpoint = fake.endpoint();
+    config.http_max_body_bytes = 64 * 1024;
+    HttpTestServer server(std::move(config));
+    auto result = server.client.Post("/v1/convert", std::string(64 * 1024 + 1, 'x'),
+                                     "application/json");
+    require(result && result->status == 413, "a body over the cap is 413");
+    result = server.client.Post("/v1/convert", std::string(64 * 1024, 'x'), "application/json");
+    require(result && result->status == 400, "a body at the cap reaches the handler");
+    require(nlohmann::json::parse(result->body)["error"]["code"] == "INVALID_ARGUMENT",
+            "the at-cap body fails as JSON, not at the transport");
+    server.stop();
+}
+
+// A caller that hangs up stops the conversion, on either route: the page
+// in the model is cut and the queued pages are never sent.
+void verify_disconnect_stops_pipeline(FakeVlm& fake, const std::string& route) {
+    vlm::Config config;
+    config.endpoint = fake.endpoint();
+    config.concurrency = 1;
+    HttpTestServer server(std::move(config));
+    fake.hold_released = false;
+    const long calls_before = fake.calls.load();
+    const long disconnects_before = fake.held_disconnects.load();
+
+    vlmv1::ConvertOptions options;
+    options.set_concurrency(1);
+    const std::string body =
+        convert_body(options, {page(1, "HOLD1"), page(2, "PAGE2"), page(3, "PAGE3")}).dump();
+    httplib::Client caller("127.0.0.1", server.gateway.port());
+    std::jthread request([&] { caller.Post(route, body, "application/json"); });
+    const bool parked = wait_until([&] { return fake.holding.load(); });
+    caller.stop();  // hang up mid-conversion
+    request.join();
+    const bool cut = wait_until([&] { return fake.held_disconnects.load() > disconnects_before; });
+    fake.release();
+    require(parked, route + ": page 1 reached the model");
+    require(cut, route + ": the hang-up reached the VLM call in flight");
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    require(fake.calls.load() - calls_before == 1,
+            route + ": queued pages are never sent after the caller left: " +
+                std::to_string(fake.calls.load() - calls_before));
+    server.stop();
+}
+
+// With a token configured every convert route needs it, the check happens
+// before the body is read, and health stays open.
+void verify_token(FakeVlm& fake) {
+    vlm::Config config;
+    config.endpoint = fake.endpoint();
+    config.http_token = vlm::Secret("t0ken-6d1e");
+    HttpTestServer server(std::move(config));
+    const std::string body = convert_body(vlmv1::ConvertOptions(), {page(1, "PAGE1")}).dump();
+
+    auto result = server.client.Post("/v1/convert", body, "application/json");
+    require(result && result->status == 401, "no token is 401");
+    nlohmann::json json = nlohmann::json::parse(result->body);
+    require(json["error"]["code"] == "UNAUTHENTICATED" && json["events"].is_array(),
+            "401 names UNAUTHENTICATED in the convert envelope");
+    require(!result->body.contains("t0ken"), "the 401 never echoes the token");
+
+    result = server.client.Post("/v1/convert", httplib::Headers{{"Authorization", "Bearer nope"}},
+                                body, "application/json");
+    require(result && result->status == 401, "a wrong token is 401");
+
+    result = server.client.Post("/v1/convert/stream", body, "application/json");
+    require(result && result->status == 401, "the stream route needs the token too");
+
+    result = server.client.Post("/v1/convert",
+                                httplib::Headers{{"Authorization", "Bearer t0ken-6d1e"}}, body,
+                                "application/json");
+    require(result && result->status == 200, "the right token converts");
+
+    result = server.client.Get("/healthz");
+    require(result && result->status == 200, "health needs no token");
+    server.stop();
 }
 
 void verify_abort_on_error_sync(httplib::Client& client) {
@@ -454,13 +535,17 @@ int main() {
         verify_sync_happy_path(server.client);
         verify_sync_garbage_json(server.client);
         verify_sync_non_png(server.client);
+        verify_sync_override_refused(server.client);
         verify_stream_flushes_per_event(server.client, fake);
         verify_envelope_shapes(server.client);
-        verify_transport_uncapped(server.client);
         verify_abort_on_error_sync(server.client);
         verify_abort_on_error_stream(server.client);
-
         server.stop();
+
+        verify_body_cap(fake);
+        verify_disconnect_stops_pipeline(fake, "/v1/convert");
+        verify_disconnect_stops_pipeline(fake, "/v1/convert/stream");
+        verify_token(fake);
     } catch (const std::exception& error) {
         std::println(stderr, "{}", error.what());
         fake.stop();

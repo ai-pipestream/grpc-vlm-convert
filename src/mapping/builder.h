@@ -7,6 +7,8 @@
 #include "mapper.h"
 
 #include <algorithm>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace vlm::mapping {
@@ -148,22 +150,104 @@ inline docv1::TableItem* add_table(docv1::Document* doc, const PageContext& page
     return table;
 }
 
+// A model stuck repeating itself (SmolDocling and Granite-Docling do) can
+// emit one enormous row and then thousands of short ones, and every table
+// here is a full rows × columns grid of TableCells: 4000 × 4000 is sixteen
+// million of them, gigabytes for one page. Tables keep their leading rows
+// and columns up to these caps (a real page's tables stay far inside
+// them), and the page says what was cut in a PageWarning.
+constexpr size_t kMaxTableRows = 2000;
+constexpr size_t kMaxTableCols = 250;
+// rows × columns of the grid.
+constexpr size_t kMaxTableCells = 50000;
+// What one table's grid may cost in cell copies: every covered position
+// holds a full copy of its anchor cell, text included, so overlapping
+// spans or long spanned text multiply. Past it the grid is left empty and
+// the cells stay.
+constexpr size_t kMaxGridBytes = 32ULL * 1024 * 1024;
+
+// What building one table cut, and the shape the source had.
+struct TableCut {
+    size_t source_rows = 0;
+    size_t source_cols = 0;
+    // Rows or columns past the caps were dropped.
+    bool truncated = false;
+    // The grid was left empty (kMaxGridBytes).
+    bool grid_omitted = false;
+};
+
+// The leading part of a rows × cols source that fits the caps.
+inline std::pair<size_t, size_t> kept_table_shape(size_t rows, size_t cols) {
+    const size_t kept_cols = std::min(cols, kMaxTableCols);
+    size_t kept_rows = std::min(rows, kMaxTableRows);
+    if (kept_cols > 0) {
+        kept_rows = std::min(kept_rows, kMaxTableCells / kept_cols);
+    }
+    return {kept_rows, kept_cols};
+}
+
+inline void add_warning(std::vector<vlmv1::PageWarning>* warnings, vlmv1::PageWarningCode code,
+                        std::string message, std::string ref) {
+    if (warnings == nullptr) {
+        return;
+    }
+    vlmv1::PageWarning& warning = warnings->emplace_back();
+    warning.set_code(code);
+    warning.set_message(std::move(message));
+    warning.set_ref(std::move(ref));
+}
+
+// Reports what building the table at `ref` cut, if anything. `what` names
+// it in the message ("table", "chart data").
+inline void note_table_cut(const TableCut& cut, const docv1::TableData& data,
+                           const std::string& what, const std::string& ref,
+                           std::vector<vlmv1::PageWarning>* warnings) {
+    if (cut.truncated) {
+        add_warning(warnings, vlmv1::PAGE_WARNING_CODE_TABLE_TRUNCATED,
+                    what + " held " + std::to_string(cut.source_rows) + " rows by " +
+                        std::to_string(cut.source_cols) + " columns; kept the first " +
+                        std::to_string(data.num_rows()) + " by " +
+                        std::to_string(data.num_cols()) + " (caps: " +
+                        std::to_string(kMaxTableRows) + " rows, " +
+                        std::to_string(kMaxTableCols) + " columns, " +
+                        std::to_string(kMaxTableCells) + " cells)",
+                    ref);
+    }
+    if (cut.grid_omitted) {
+        add_warning(warnings, vlmv1::PAGE_WARNING_CODE_TABLE_GRID_OMITTED,
+                    what + " grid would cost more than " + std::to_string(kMaxGridBytes) +
+                        " bytes of cell copies (overlapping or long spanned cells); kept its " +
+                        std::to_string(data.table_cells_size()) + " cells with an empty grid",
+                    ref);
+    }
+}
+
 // Fills a TableData from rows of already-split cell text: a rectangular
 // grid of 1x1 cells, `table_cells` mirroring the grid, and the first
 // `header_rows` rows flagged as column headers. Ragged source rows still
 // produce a rectangular grid (the grid invariant): short rows pad with
-// empty 1x1 cells up to the widest row. Shared by every mapper whose
-// source gives it rows and cells but no spans.
-inline void fill_table_data(docv1::TableData* data,
-                            const std::vector<std::vector<std::string>>& rows,
-                            size_t header_rows) {
-    size_t num_cols = 0;
+// empty 1x1 cells up to the widest row. Only the leading rows and columns
+// within the table caps are kept. Shared by every mapper whose source
+// gives it rows and cells but no spans.
+inline TableCut fill_table_data(docv1::TableData* data,
+                                const std::vector<std::vector<std::string>>& rows,
+                                size_t header_rows) {
+    TableCut cut;
+    cut.source_rows = rows.size();
     for (const std::vector<std::string>& row : rows) {
-        num_cols = std::max(num_cols, row.size());
+        cut.source_cols = std::max(cut.source_cols, row.size());
     }
-    data->set_num_rows(static_cast<int32_t>(rows.size()));
+    const auto [num_rows, kept_cols] = kept_table_shape(cut.source_rows, cut.source_cols);
+    cut.truncated = num_rows < cut.source_rows || kept_cols < cut.source_cols;
+    // The widest kept row sets the grid width (the widest source row may be
+    // one of the dropped ones).
+    size_t num_cols = 0;
+    for (size_t r = 0; r < num_rows; r++) {
+        num_cols = std::max(num_cols, std::min(rows[r].size(), kept_cols));
+    }
+    data->set_num_rows(static_cast<int32_t>(num_rows));
     data->set_num_cols(static_cast<int32_t>(num_cols));
-    for (size_t r = 0; r < rows.size(); r++) {
+    for (size_t r = 0; r < num_rows; r++) {
         docv1::TableRow* grid_row = data->add_grid();
         for (size_t c = 0; c < num_cols; c++) {
             docv1::TableCell cell;
@@ -184,6 +268,7 @@ inline void fill_table_data(docv1::TableData* data,
             }
         }
     }
+    return cut;
 }
 
 namespace internal {

@@ -4,13 +4,15 @@
 # driver. Intel's own IPEX images carry a 2025 driver that reports
 # ZE_RESULT_ERROR_UNINITIALIZED on this hardware. torch comes from the
 # PyTorch XPU wheel index and brings its oneAPI runtime pieces via pip.
-FROM ghcr.io/ggml-org/llama.cpp:server-intel
+# Pinned by digest: the tag moves with every llama.cpp release. Bump the
+# digest deliberately (docker buildx imagetools inspect the tag).
+FROM ghcr.io/ggml-org/llama.cpp:server-intel@sha256:2f4940610095fe48aabff3db7f87feb4f553081302b1a5a8744a589eb123b451
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /srv
 RUN python3 -m venv /venv && /venv/bin/pip install --no-cache-dir \
-    torch==2.9.1 torchvision --index-url https://download.pytorch.org/whl/xpu
+    torch==2.9.1 torchvision==0.24.1 --index-url https://download.pytorch.org/whl/xpu
 COPY requirements.txt .
 RUN /venv/bin/pip install --no-cache-dir -r requirements.txt
 COPY server.py .
@@ -23,4 +25,6 @@ ENV NORTH_DEVICE=xpu HF_HOME=/hf PATH=/venv/bin:/usr/local/sbin:/usr/local/bin:/
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=600s CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health').status==200 else 1)"
 ENTRYPOINT []
+# 0.0.0.0 inside the container is what docker port publishing reaches;
+# compose.yaml decides which host address that is (127.0.0.1 by default).
 CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]

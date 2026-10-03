@@ -1,7 +1,9 @@
 #include "image_crop.h"
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
+#include <cstdint>
 #include <vector>
 
 // stb is single-header, public domain / MIT. The implementation lives in
@@ -51,61 +53,125 @@ void png_sink_write(void* context, void* data, int size) {
 
 }  // namespace
 
-bool crop_png_image(const std::string& png, double left, double top, double right,
-                    double bottom, uint32_t page_width, uint32_t page_height,
-                    docv1::ImageRef* image) {
+PageRaster::PageRaster(std::string_view png, uint32_t page_width, uint32_t page_height,
+                       CropBudget budget)
+    : png_(png), page_width_(page_width), page_height_(page_height), budget_(budget) {}
+
+PageRaster::~PageRaster() {
+    if (pixels_ != nullptr) {
+        stbi_image_free(pixels_);
+    }
+}
+
+bool PageRaster::decode() {
+    if (tried_) {
+        return pixels_ != nullptr;
+    }
+    tried_ = true;
+    const auto* bytes = reinterpret_cast<const stbi_uc*>(png_.data());
+    const int size = static_cast<int>(std::min<size_t>(png_.size(), INT32_MAX));
+    // The header first: what the raster claims to be is checked before a
+    // byte of it is decoded.
     int width = 0, height = 0, channels = 0;
-    stbi_uc* pixels = stbi_load_from_memory(
-        reinterpret_cast<const stbi_uc*>(png.data()), static_cast<int>(png.size()), &width,
-        &height, &channels, 4);
-    if (pixels == nullptr || width <= 0 || height <= 0) {
+    if (stbi_info_from_memory(bytes, size, &width, &height, &channels) == 0 || width <= 0 ||
+        height <= 0) {
         return false;
+    }
+    width_ = width;
+    height_ = height;
+    if (static_cast<uint64_t>(width) * static_cast<uint64_t>(height) > kMaxRasterPixels) {
+        too_large_ = true;
+        return false;
+    }
+    decodes_++;
+    pixels_ = stbi_load_from_memory(bytes, size, &width, &height, &channels, 4);
+    if (pixels_ == nullptr || width != width_ || height != height_) {
+        if (pixels_ != nullptr) {
+            stbi_image_free(pixels_);
+            pixels_ = nullptr;
+        }
+        return false;
+    }
+    return true;
+}
+
+PageRaster::Crop PageRaster::crop(double left, double top, double right, double bottom,
+                                  docv1::ImageRef* image) {
+    if (!decode()) {
+        return too_large_ ? Crop::kRasterTooLarge : Crop::kFailed;
     }
 
     // The box is in the declared page raster coordinates; scale into the
     // decoded image's actual pixels before clamping. Clamping happens in
     // the double domain: casting an out-of-range double to int is UB, and
     // hostile loc values can drive the box far outside the raster.
-    const double sx = page_width > 0 ? static_cast<double>(width) / page_width : 1.0;
-    const double sy = page_height > 0 ? static_cast<double>(height) / page_height : 1.0;
+    const double sx = page_width_ > 0 ? static_cast<double>(width_) / page_width_ : 1.0;
+    const double sy = page_height_ > 0 ? static_cast<double>(height_) / page_height_ : 1.0;
     const int x1 = static_cast<int>(std::clamp(std::floor(left * sx), 0.0,
-                                               static_cast<double>(width)));
+                                               static_cast<double>(width_)));
     const int y1 = static_cast<int>(std::clamp(std::floor(top * sy), 0.0,
-                                               static_cast<double>(height)));
+                                               static_cast<double>(height_)));
     const int x2 = static_cast<int>(std::clamp(std::ceil(right * sx), 0.0,
-                                               static_cast<double>(width)));
+                                               static_cast<double>(width_)));
     const int y2 = static_cast<int>(std::clamp(std::ceil(bottom * sy), 0.0,
-                                               static_cast<double>(height)));
+                                               static_cast<double>(height_)));
     if (x2 <= x1 || y2 <= y1) {
-        stbi_image_free(pixels);
-        return false;
+        return Crop::kFailed;
+    }
+
+    if (inline_bytes_spent_) {
+        return Crop::kOverByteCap;
     }
 
     const int crop_w = x2 - x1;
     const int crop_h = y2 - y1;
-    std::vector<stbi_uc> crop(static_cast<size_t>(crop_w) * crop_h * 4);
-    for (int row = 0; row < crop_h; row++) {
-        const stbi_uc* src = pixels + (static_cast<size_t>(y1 + row) * width + x1) * 4;
-        std::copy_n(src, static_cast<size_t>(crop_w) * 4,
-                    crop.data() + static_cast<size_t>(row) * crop_w * 4);
+    const uint64_t area = static_cast<uint64_t>(crop_w) * static_cast<uint64_t>(crop_h);
+    const double area_budget = budget_.max_area_pages * static_cast<double>(width_) *
+                               static_cast<double>(height_);
+    if (crops_ >= budget_.max_crops ||
+        static_cast<double>(cropped_pixels_ + area) > area_budget) {
+        return Crop::kOverBudget;
     }
-    stbi_image_free(pixels);
+    crops_++;
+    cropped_pixels_ += area;
+
+    std::vector<stbi_uc> pixels(static_cast<size_t>(crop_w) * crop_h * 4);
+    for (int row = 0; row < crop_h; row++) {
+        const stbi_uc* src = pixels_ + (static_cast<size_t>(y1 + row) * width_ + x1) * 4;
+        std::copy_n(src, static_cast<size_t>(crop_w) * 4,
+                    pixels.data() + static_cast<size_t>(row) * crop_w * 4);
+    }
 
     PngSink sink;
-    if (stbi_write_png_to_func(png_sink_write, &sink, crop_w, crop_h, 4, crop.data(),
+    if (stbi_write_png_to_func(png_sink_write, &sink, crop_w, crop_h, 4, pixels.data(),
                                crop_w * 4) == 0 ||
         sink.bytes.empty()) {
-        return false;
+        return Crop::kFailed;
     }
+
+    std::string uri = "data:image/png;base64," +
+                      base64_encode(reinterpret_cast<const unsigned char*>(sink.bytes.data()),
+                                    sink.bytes.size());
+    // Subtraction, not addition: inline_bytes_ never exceeds the cap.
+    if (uri.size() > budget_.max_inline_bytes - inline_bytes_) {
+        inline_bytes_spent_ = true;
+        return Crop::kOverByteCap;
+    }
+    inline_bytes_ += uri.size();
 
     image->set_mimetype("image/png");
     image->set_dpi(72);  // docling's ImageRef.from_pil default
     image->mutable_size()->set_width(crop_w);
     image->mutable_size()->set_height(crop_h);
-    image->set_uri("data:image/png;base64," +
-                   base64_encode(reinterpret_cast<const unsigned char*>(sink.bytes.data()),
-                                 sink.bytes.size()));
-    return true;
+    image->set_uri(std::move(uri));
+    return Crop::kAttached;
+}
+
+bool crop_png_image(const std::string& png, double left, double top, double right,
+                    double bottom, uint32_t page_width, uint32_t page_height,
+                    docv1::ImageRef* image) {
+    PageRaster raster(png, page_width, page_height);
+    return raster.crop(left, top, right, bottom, image) == PageRaster::Crop::kAttached;
 }
 
 }  // namespace vlm::mapping

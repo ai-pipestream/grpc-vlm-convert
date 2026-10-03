@@ -23,6 +23,11 @@ class VlmConvertServiceImpl;
 //   POST /v1/convert/stream  — same request; chunked NDJSON out, one
 //                              ConvertPagesResponse per line as it happens
 //   GET  /healthz            — 200 "ok"
+//
+// It binds loopback unless the operator names another host, and then a
+// bearer token is required (both checked at startup, see Config). Request
+// bodies are capped (413 past http_max_body_bytes), and a caller that
+// hangs up on /v1/convert stops its pipeline.
 class HttpGateway {
   public:
     HttpGateway(const Config& config, VlmConvertServiceImpl& service);

@@ -51,6 +51,26 @@ vocabularies, the expected `response_format` (`DOCTAGS` / `MARKDOWN` /
 `endpoint` override, `concurrency` (pages in flight against the VLM),
 and `abort_on_error`.
 
+The `endpoint` override is refused with `PERMISSION_DENIED` unless the
+operator sets `GRPC_VLM_ALLOW_ENDPOINT_OVERRIDE=true`: it would let any
+caller point this server at any host it can reach (SSRF). Naming the
+configured endpoint itself is not an override, in any spelling that
+reaches the same URL: the two are compared parsed, host case-blind, an
+absent port as 80, trailing slashes and the `/v1` or
+`/v1/chat/completions` suffix resolved the way calls resolve them. A
+different host, port, path prefix or query is an override. The operator's
+`GRPC_VLM_API_KEY` goes only to the configured endpoint, never to an
+override.
+
+An endpoint is an `http://` URL in one of three shapes: a base
+(`http://vlm:8080`, optionally with a path prefix) gets
+`/v1/chat/completions` appended, an OpenAI-style base ending in `/v1`
+gets `/chat/completions`, and a full `.../chat/completions` URL
+(Docling's `ApiVlmOptions.url`) is used as is. A `user:password@` part
+is refused. Only the endpoint's scheme, host and port ever leave the
+process (logs, errors, `GetServiceInfo`, `GenerationSource`), because
+deployments put tokens in the path and query.
+
 Events arrive in completion order, not page order:
 
 1. `PageStarted`: page_no.
@@ -74,10 +94,20 @@ takes the stream as three callables (read / write / cancelled), and the
 gRPC override and the HTTP handlers both drive that one pipeline, so
 concurrency caps, byte and page caps, `abort_on_error`, completion
 order, and the error matrix (INVALID_ARGUMENT → 400,
-RESOURCE_EXHAUSTED → 413, UNIMPLEMENTED → 501, else 500) cannot drift
+PERMISSION_DENIED → 403, RESOURCE_EXHAUSTED → 413, UNIMPLEMENTED →
+501, else 500) cannot drift
 between transports. Message bodies are canonical proto3 JSON
 (`MessageToJsonString` / `JsonStringToMessage`); nlohmann/json touches
 only the `{"options", "pages"}` envelope.
+
+The shim binds `GRPC_VLM_HTTP_HOST`, loopback by default: it converts
+pages, and pays for VLM calls, for whoever reaches it, so any other host
+requires `GRPC_VLM_HTTP_TOKEN` (startup fails without one), checked in a
+pre-routing handler before the body is read. Bodies are capped at the
+transport (`GRPC_VLM_HTTP_MAX_BODY_BYTES`, 413), because a request is
+held several times over before the pipeline's own caps apply. The
+synchronous route passes the connection's liveness as the pipeline's
+`cancelled` probe, so a caller that hangs up halts its stream.
 
 ## 4. Response mapping
 
@@ -89,9 +119,26 @@ only the `{"options", "pages"}` envelope.
 | OTSL | table-shaped items |
 | Plaintext | one `TextItem` per page |
 
+### Size caps and page warnings
+
+Every mapper builds tables as a full rows × columns grid, so a model stuck
+repeating itself (one 4000-cell row, then thousands of short rows) would
+otherwise produce sixteen million `TableCell`s for one page. Tables, and a
+chart's data table, keep at most their leading 2000 rows and 250 columns
+within 50 000 grid cells. A grid whose cell copies (each anchor copied
+onto every position its span covers) would cost more than 32 MiB, through
+overlapping spans or long spanned text, is left empty and the cells stay.
+Whatever was cut is reported beside the fragment as a typed `PageWarning`
+on `PageDocument.warnings` (`PAGE_WARNING_CODE_TABLE_TRUNCATED` /
+`PAGE_WARNING_CODE_TABLE_GRID_OMITTED`, the item's ref, and a message with
+the numbers), so a cut table never passes for a complete one.
+
 ### HTML mapping rules
 
-Block matching spans newlines, since model output wraps its markup. A
+Block matching spans newlines, since model output wraps its markup, and
+is a linear scan rather than a regex: libstdc++'s regex engine recurses
+per character, and one 60 KB block overflowed the stack. A tag name
+matches exactly (`<p>` is not `<pre>`, `<tr>` is not `<track>`). A
 `<table>` carries real `TableData`: `<tr>` rows of `<th>`/`<td>` cells,
 1x1, ragged rows padded to a rectangular grid (padding is grid filler
 only, never a source cell), and the leading run of all-`<th>` rows
@@ -171,13 +218,28 @@ children are the chunk's items, all stamped with the chunk's first
 
 Picture and chart regions are cropped from the page raster (stb) and
 attached as `ImageRef` PNG data URIs; a missing or undecodable raster
-still yields the PictureItem, just without an image.
+still yields the PictureItem, just without an image. The raster is
+decoded once per page, on the first crop, and never when its header
+claims more than 40 million pixels; a page spends at most 100 crops and
+twice its own pixels on them, so a model repeating `<picture>` cannot
+multiply the page into its fragment. The data URIs a page carries are
+also capped in bytes (`GRPC_VLM_MAX_PAGE_CROP_BYTES`, default 3 MiB):
+one near-full-page crop at 300 DPI can come close to the 4 MiB receive
+limit gRPC clients default to, and a `PageDocument` past the client's
+limit fails its whole stream. The first crop that would cross the cap
+is dropped, and so is every later crop on that page. A picture a cap
+refused keeps its PictureItem without an image, and the page carries a
+`PAGE_WARNING_CODE_PICTURE_IMAGES_SKIPPED` warning per cap that refused
+one.
 
 Logprobs: if the VLM endpoint returns them, the mean token
 log-probability over the response rides the `CollectorSource` as
 `raw_score` with `raw_score_kind` `page_mean_token_logprob` and
 `raw_score_samples` set to the number of tokens the mean was taken
-over. Skip silently when absent.
+over. Skip silently when absent. Some OpenAI-compatible servers reject
+the `logprobs` parameter with a 400; `GRPC_VLM_LOGPROBS=false` leaves it
+off (and refuses `top_logprobs`, which needs it, with
+`FAILED_PRECONDITION`).
 
 It is deliberately not `confidence`. The mean is computed over the whole
 page, so stamping it as a per-item confidence reports a crisp heading
@@ -210,8 +272,9 @@ Every emitted item carries two sources: the `CollectorSource`
 (`vlm-convert`, the resolved model name, this server's version) and a
 `GenerationSource` describing the call that produced the page — the
 model the endpoint says answered (the requested name only when it
-echoes none), the endpoint origin (scheme and authority; the path is
-dropped because deployments hide tokens there), the `finish_reason`
+echoes none), the endpoint origin (scheme, host and port; userinfo,
+path and query are dropped because deployments hide tokens there), the
+`finish_reason`
 verbatim, and `prompt_tokens` / `completion_tokens` when the endpoint
 reports usage. All of it is optional on the wire and recorded only when
 present.
@@ -229,8 +292,49 @@ exponential backoff (100 ms base: 0.1 s, 0.2 s, 0.4 s, ...) on HTTP
 refused while the VLM server starts). Other statuses, and 200s that do
 not parse, fail without a retry, so a persistently failing page
 surfaces as a failed `PageRaw` after 6 attempts total. The configured
-timeout applies per attempt (worst case 6 × timeout); tests pin the
-backoff base to zero via `set_retry_backoff_base_ms`.
+timeout (`GRPC_VLM_VLM_TIMEOUT_SECONDS`) is one wall-clock budget for
+the whole call: attempts and backoff sleeps all spend from it, and an
+endpoint that drips a byte at a time cannot stretch it (httplib's
+per-read timeout alone would let it). Cancellation reaches the call
+too: when the client cancels or its deadline passes, the stream notices
+within 50 ms, and a watchdog per call shuts the in-flight socket down
+(httplib `Client::stop`), mid-wait on the model included; no retry
+follows and the page emits nothing. Tests pin the backoff base to zero
+via `set_retry_backoff_base_ms`.
+
+### Back-pressure and stopping
+
+A page is admitted to the model queue (its `PageStarted` goes out) only
+when its bytes fit two budgets: the stream's
+(`GRPC_VLM_MAX_STREAM_BUFFERED_BYTES`) and the server's
+(`GRPC_VLM_MAX_BUFFERED_BYTES`), both counting pages read but not yet
+answered, queued or in flight. Until it fits, the read loop holds the
+page and reads nothing more, so gRPC flow control holds a client that
+sends faster than the model answers; waiters are served in arrival
+order. The event queue is deliberately not bounded: a client that
+uploads every page before reading any event (gRParse does) would
+otherwise deadlock against it. It holds at most two events per page for
+at most `max_pages` pages, but **the bytes of queued output are not
+bounded**: both budgets count input PNG bytes only and are given back
+once a page is mapped, so finished `PageDocument`s (text, tables, inline
+picture crops) wait in server memory for as long as the client does not
+read them. A client must read events concurrently with uploading pages;
+one that uploads a whole document first makes the server hold the whole
+converted document. Bounding output (for example, a page keeps its
+stream lease until the writer hands its event to `Write`, so an unread
+stream stops admitting pages) is the follow-up once gRParse reads
+concurrently; done before that, it would deadlock gRParse, which writes
+every page before reading any response.
+
+Every VLM call also takes one of the server's `GRPC_VLM_MAX_INFLIGHT`
+slots, so many streams cannot pile requests onto an endpoint that
+serves one at a time.
+
+A stream halts once nobody will receive its answers: the client
+cancelled or its deadline passed, the consumer stopped taking events, a
+page turned out bad (`INVALID_ARGUMENT`, `RESOURCE_EXHAUSTED`, ...), or
+`abort_on_error` met a failed page. Queued pages are then skipped, calls
+in flight are cut, and nothing more is read.
 
 ## 5. Presets vs endpoints
 

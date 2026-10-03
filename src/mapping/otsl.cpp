@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <utility>
 #include <vector>
 
 #include "builder.h"
@@ -64,11 +65,17 @@ std::string next_token(const std::string& body, size_t* pos, std::string* text) 
     return tag;
 }
 
-// Splits the token stream into grid rows. <nl> ends a row; <srow> starts a
-// new (section) row, so a row break also happens when one arrives mid-row.
-std::vector<std::vector<OtslToken>> split_rows(const std::string& body) {
-    std::vector<std::vector<OtslToken>> rows;
-    std::vector<OtslToken> current;
+// Walks the token stream as grid rows: <nl> ends a row, and <srow> starts
+// a new (section) row, so a row break also happens when one arrives
+// mid-row. Anything that is not a cell token (the enclosing otsl tags,
+// stray markup) is skipped and opens no row. visit(row, col, token) sees
+// every cell token in order; returns the shape {rows, widest row}.
+template <typename Visit>
+std::pair<size_t, size_t> scan_rows(const std::string& body, Visit&& visit) {
+    size_t row = 0;
+    size_t col = 0;
+    size_t rows = 0;
+    size_t cols = 0;
     size_t pos = 0;
     while (pos < body.size()) {
         OtslToken token;
@@ -77,35 +84,53 @@ std::vector<std::vector<OtslToken>> split_rows(const std::string& body) {
             break;
         }
         if (token.tag == "nl") {
-            if (!current.empty()) {
-                rows.push_back(std::move(current));
-                current.clear();
+            if (col > 0) {
+                row++;
+                col = 0;
             }
             continue;
         }
-        if (token.tag == "srow" && !current.empty()) {
-            rows.push_back(std::move(current));
-            current.clear();
+        if (!is_anchor(token.tag) && !is_horizontal_filler(token.tag) &&
+            !is_vertical_filler(token.tag)) {
+            continue;
         }
-        if (is_anchor(token.tag) || is_horizontal_filler(token.tag) ||
-            is_vertical_filler(token.tag)) {
-            current.push_back(std::move(token));
+        if (token.tag == "srow" && col > 0) {
+            row++;
+            col = 0;
         }
-        // Anything else (the enclosing otsl tags, stray markup) is ignored.
+        visit(row, col, std::move(token));
+        col++;
+        rows = std::max(rows, row + 1);
+        cols = std::max(cols, col);
     }
-    if (!current.empty()) {
-        rows.push_back(std::move(current));
-    }
-    return rows;
+    return {rows, cols};
 }
 
 }  // namespace
 
-bool parse_otsl_grid(const std::string& body, docv1::TableData* data) {
-    const std::vector<std::vector<OtslToken>> rows = split_rows(body);
-    if (rows.empty()) {
+bool parse_otsl_grid(const std::string& body, docv1::TableData* data, TableCut* cut) {
+    TableCut local_cut;
+    TableCut& report = cut != nullptr ? *cut : local_cut;
+
+    // Two passes: the shape first, with nothing stored, then only the
+    // part within the table caps. A model repeating itself can emit far
+    // more tokens than any table holds, and none of the excess is kept.
+    const auto [source_rows, source_cols] =
+        scan_rows(body, [](size_t, size_t, OtslToken&&) {});
+    if (source_rows == 0) {
         return false;
     }
+    report.source_rows = source_rows;
+    report.source_cols = source_cols;
+    const auto [kept_rows, kept_cols] = kept_table_shape(source_rows, source_cols);
+    report.truncated = kept_rows < source_rows || kept_cols < source_cols;
+    std::vector<std::vector<OtslToken>> rows(kept_rows);
+    scan_rows(body, [&, kept_rows = kept_rows, kept_cols = kept_cols](size_t row, size_t col,
+                                                                      OtslToken&& token) {
+        if (row < kept_rows && col < kept_cols) {
+            rows[row].push_back(std::move(token));
+        }
+    });
 
     const int32_t num_rows = static_cast<int32_t>(rows.size());
     int32_t num_cols = 0;
@@ -151,6 +176,22 @@ bool parse_otsl_grid(const std::string& body, docv1::TableData* data) {
         }
     }
 
+    // The grid copies each anchor onto every position its span covers.
+    // Overlapping spans (malformed output) and long spanned text multiply
+    // that, so the cost is counted before anything is copied.
+    size_t grid_bytes = 0;
+    for (const docv1::TableCell& cell : data->table_cells()) {
+        const size_t rows_covered = static_cast<size_t>(
+            std::min(cell.end_row_offset_idx(), num_rows) - cell.start_row_offset_idx());
+        const size_t cols_covered = static_cast<size_t>(
+            std::min(cell.end_col_offset_idx(), num_cols) - cell.start_col_offset_idx());
+        grid_bytes += rows_covered * cols_covered * cell.ByteSizeLong();
+        if (grid_bytes > kMaxGridBytes) {
+            report.grid_omitted = true;
+            return true;
+        }
+    }
+
     // The grid is the full num_rows × num_cols matrix with each anchor cell
     // stamped over every position its span covers (docling's TableData.grid
     // computed field); uncovered positions stay empty 1x1 cells.
@@ -179,7 +220,7 @@ bool parse_otsl_grid(const std::string& body, docv1::TableData* data) {
 }
 
 bool map_otsl(const std::string& text, const PageContext& page, docv1::Document* out,
-              std::string* error) {
+              std::string* error, std::vector<vlmv1::PageWarning>* warnings) {
     // The OTSL payload may arrive wrapped in <otsl>...</otsl> or bare.
     std::string body = text;
     if (const size_t open = text.find("<otsl>"); open != std::string::npos) {
@@ -189,10 +230,12 @@ bool map_otsl(const std::string& text, const PageContext& page, docv1::Document*
                    : text.substr(open + 6, close - open - 6);
     }
     docv1::TableItem* table = add_table(out, page, page_prov(page));
-    if (!parse_otsl_grid(body, table->mutable_data())) {
+    TableCut cut;
+    if (!parse_otsl_grid(body, table->mutable_data(), &cut)) {
         *error = "OTSL response held no complete table row";
         return false;
     }
+    note_table_cut(cut, table->data(), "table", body_child_ref(BodyChild::TABLE, 0), warnings);
     finalize_document(out, page);
     return true;
 }

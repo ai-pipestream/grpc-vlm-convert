@@ -1,7 +1,7 @@
 #include "http_gateway.h"
 
 #include <functional>
-#include <limits>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -23,6 +23,10 @@ const char* status_code_name(grpc::StatusCode code) {
             return "INVALID_ARGUMENT";
         case grpc::StatusCode::FAILED_PRECONDITION:
             return "FAILED_PRECONDITION";
+        case grpc::StatusCode::PERMISSION_DENIED:
+            return "PERMISSION_DENIED";
+        case grpc::StatusCode::UNAUTHENTICATED:
+            return "UNAUTHENTICATED";
         case grpc::StatusCode::RESOURCE_EXHAUSTED:
             return "RESOURCE_EXHAUSTED";
         case grpc::StatusCode::UNIMPLEMENTED:
@@ -42,6 +46,10 @@ int http_status_for(grpc::StatusCode code) {
     switch (code) {
         case grpc::StatusCode::INVALID_ARGUMENT:
             return 400;
+        case grpc::StatusCode::UNAUTHENTICATED:
+            return 401;
+        case grpc::StatusCode::PERMISSION_DENIED:
+            return 403;
         case grpc::StatusCode::RESOURCE_EXHAUSTED:
             return 413;
         case grpc::StatusCode::UNIMPLEMENTED:
@@ -54,6 +62,15 @@ int http_status_for(grpc::StatusCode code) {
 std::string error_json(grpc::StatusCode code, const std::string& message) {
     nlohmann::json error = {{"code", status_code_name(code)}, {"message", message}};
     return error.dump();
+}
+
+// "Authorization: Bearer <token>" carrying the operator's token, compared
+// in constant time.
+bool bearer_matches(const httplib::Request& request, const Secret& token) {
+    constexpr std::string_view kScheme = "Bearer ";
+    const std::string header = request.get_header_value("Authorization");
+    return header.starts_with(kScheme) &&
+           token.matches(std::string_view(header).substr(kScheme.size()));
 }
 
 // Envelope → the exact request sequence a gRPC client would stream:
@@ -122,11 +139,33 @@ grpc::Status run_pipeline(VlmConvertServiceImpl& service,
 
 HttpGateway::HttpGateway(const Config& config, VlmConvertServiceImpl& service)
     : config_(config), service_(service) {
-    // cpp-httplib 0.53 caps request bodies at 100MB by default (0.20 had
-    // no cap). The page caps here are max_page_bytes (configurable up to
-    // 1GB) times the envelope, enforced per page by the pipeline — keep
-    // the transport uncapped so the app-level limits stay authoritative.
-    server_.set_payload_max_length((std::numeric_limits<size_t>::max)());
+    // The whole body is buffered, then held again as JSON and as protobuf,
+    // before the pipeline's per-page caps ever see it: the transport cap is
+    // what bounds a request's memory. Past it httplib answers 413 having
+    // read no more than the cap.
+    server_.set_payload_max_length(config.http_max_body_bytes);
+    // With a token configured, every route but /healthz needs it. The check
+    // runs before the body is read, and the 401 closes the connection, so
+    // an unauthenticated caller cannot make the server buffer anything.
+    if (!config.http_token.empty()) {
+        server_.set_pre_routing_handler([this](const httplib::Request& request,
+                                               httplib::Response& response) {
+            if (request.path == "/healthz" || bearer_matches(request, config_.http_token)) {
+                return httplib::Server::HandlerResponse::Unhandled;
+            }
+            const std::string error =
+                error_json(grpc::StatusCode::UNAUTHENTICATED,
+                           "missing or wrong bearer token (Authorization: Bearer <token>)");
+            response.status = 401;
+            response.set_header("WWW-Authenticate", "Bearer");
+            response.set_header("Connection", "close");
+            response.set_content(request.path == "/v1/convert"
+                                     ? "{\"events\":[],\"error\":" + error + "}"
+                                     : "{\"error\":" + error + "}",
+                                 "application/json");
+            return httplib::Server::HandlerResponse::Handled;
+        });
+    }
     server_.Get("/healthz", [](const httplib::Request& /*request*/,
                                httplib::Response& response) {
         response.set_content("ok", "text/plain");
@@ -187,7 +226,10 @@ void HttpGateway::handle_convert(const httplib::Request& request,
         events.push_back(std::move(json));
         return true;
     };
-    grpc::Status status = run_pipeline(service_, &requests, write, nullptr);
+    // A caller that hangs up before its answer is ready stops the
+    // pipeline: queued pages are skipped and calls in flight are cut,
+    // rather than every page being sent to the VLM and paid for.
+    grpc::Status status = run_pipeline(service_, &requests, write, request.is_connection_closed);
     if (serialize_failed && status.ok()) {
         status = grpc::Status(grpc::StatusCode::INTERNAL, "event JSON serialization failed");
     }

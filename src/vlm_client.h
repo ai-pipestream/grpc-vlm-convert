@@ -1,15 +1,23 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <string>
+#include <string_view>
 #include <vector>
+
+#include "secret.h"
 
 namespace vlm {
 
 // One page's call to the VLM endpoint.
 struct VlmCall {
-    // OpenAI-compatible base, e.g. "http://vlm:8080" (an optional path
-    // prefix is honored). /v1/chat/completions is appended.
+    // OpenAI-compatible endpoint in one of three shapes: a base such as
+    // "http://vlm:8080" (an optional path prefix is honored), which gets
+    // /v1/chat/completions appended; an OpenAI-style base ending in /v1,
+    // which gets /chat/completions; or a full chat completions URL ending
+    // in /chat/completions (Docling's ApiVlmOptions.url), used as is. A
+    // query string rides along on the request.
     std::string endpoint;
     // Model name forwarded verbatim ("model" field on the wire).
     std::string model;
@@ -22,10 +30,26 @@ struct VlmCall {
     // OpenAI "top_logprobs": how many alternates per generated token the
     // endpoint should return. Zero omits the parameter and asks for none.
     int top_logprobs = 0;
-    // PNG-encoded page raster.
-    std::string png;
-    // Whole-call timeout in seconds.
+    // OpenAI "logprobs": true (the page score). False omits the parameter,
+    // for endpoints that reject it; top_logprobs > 0 sends it regardless,
+    // since alternates need it.
+    bool logprobs = true;
+    // PNG-encoded page raster, viewed rather than copied: the caller keeps
+    // the bytes alive for the call (the service's worker owns the one copy
+    // of each page).
+    std::string_view png;
+    // Wall-clock budget for the whole call in seconds: every attempt and
+    // every backoff sleep together, not each socket read.
     long timeout_seconds = 300;
+    // Sent as "Authorization: Bearer <key>" when set. The service sets it
+    // only for the endpoint the operator configured, never for one a
+    // request named.
+    Secret api_key{};
+    // True once the caller no longer wants the answer (its stream was
+    // cancelled or is aborting). Polled between attempts and, from a
+    // watchdog thread, while an attempt is in flight, so it must be cheap
+    // and thread-safe. Empty means the call is never cancelled.
+    std::function<bool()> cancelled{};
 };
 
 // One alternate reading the endpoint offered for a generated token.
@@ -48,6 +72,9 @@ struct VlmResult {
     std::string text;
     // Failure detail when !ok.
     std::string error;
+    // True when the caller's cancel probe cut the call short: nothing is
+    // known about the page, and nobody is waiting for it.
+    bool cancelled = false;
     // Mean token log-probability over the whole response, verbatim and
     // unrescaled, when the endpoint reported logprobs; has_logprobs is
     // false when it did not (skipped silently). It is a page-wide
@@ -75,27 +102,44 @@ struct VlmResult {
     uint64_t completion_tokens = 0;
 };
 
-// Calls {endpoint}/v1/chat/completions with the page image inline as a
-// data URL. Blocking; meant for the worker pool. Retries like docling's
+// Posts one chat completion to the endpoint (VlmCall::endpoint lists the
+// shapes it takes) with the page image inline as a data URL. Blocking;
+// meant for the worker pool. Retries like docling's
 // api_image_request: up to 5 retries with exponential backoff (100ms
 // base) on HTTP 429/500/502/503/504 and on connect-level transport
 // failures (vLLM still starting); other statuses, and 200s that do not
-// parse, fail without a retry. The configured timeout applies per
-// attempt, so a worst-case call takes (1 + retries) × timeout.
+// parse, fail without a retry. timeout_seconds bounds the whole call,
+// retries and backoff included, and an endpoint that drips bytes cannot
+// stretch it. When the caller's probe turns true the call ends at once,
+// mid-attempt included (the in-flight socket is shut down), and nothing
+// more is sent.
 VlmResult generate(const VlmCall& call);
 
 // Test hook: overrides the retry backoff base delay in milliseconds.
 // Tests set this to 0 so persistent-failure cases do not sleep ~3s.
 void set_retry_backoff_base_ms(long ms);
 
-// Validates an endpoint string enough to fail fast at RPC start
-// (scheme://host[:port][/path], http only). Empty detail when valid.
+// Validates an endpoint string enough to fail fast at startup and at RPC
+// start: http://host[:port][/path][?query], a host of letters, digits,
+// '.', '-', '_' (or a bracketed IPv6 literal), a port from 1 to 65535,
+// and no user:password@ part. Empty detail when valid. The detail never
+// quotes the endpoint: deployments put tokens in it.
 std::string endpoint_error(const std::string& endpoint);
 
-// Scheme and authority of an endpoint, dropping any path prefix: what a
-// fragment records about who answered. The path is dropped on purpose —
-// deployments put tokens in it. Returns the input unchanged when it does
-// not parse as an endpoint.
+// True when both endpoints parse and a call to either would reach the same
+// URL: same host (compared case-blind), same port (an absent one is 80),
+// and the same request target once the shapes VlmCall::endpoint lists
+// are resolved, so "http://vlm:8080", "http://VLM:8080/" and
+// "http://vlm:8080/v1/chat/completions" are one endpoint. A different
+// path prefix or query is a different endpoint. False when either does
+// not parse.
+bool same_endpoint(const std::string& left, const std::string& right);
+
+// The endpoint as it may be shown: scheme, host and port only. Userinfo,
+// path, query and fragment are dropped on purpose, because deployments put
+// tokens in all of them. Startup logs, GetServiceInfo, error text and the
+// GenerationSource a fragment records use this, never the endpoint itself.
+// Returns "<invalid endpoint>" when the string does not parse.
 std::string endpoint_origin(const std::string& endpoint);
 
 }  // namespace vlm

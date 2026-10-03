@@ -7,7 +7,9 @@
 #include <grpcpp/grpcpp.h>
 
 #include <atomic>
+#include <chrono>
 #include <cmath>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -19,9 +21,11 @@
 
 #include "config.h"
 #include "fixture.h"
+#include "mapping/image_crop.h"
 #include "service/vlm_convert_service.h"
 #include "vlm_client.h"
 
+namespace docv1 = ai::pipestream::document::v1;
 namespace vlmv1 = ai::pipestream::vlm::v1;
 
 namespace {
@@ -57,6 +61,7 @@ std::string base64_decode(const std::string& encoded) {
 //   FAIL    → HTTP 503
 //   MDPAGE  → canned markdown
 //   RAWTEXT → prose without markup (mapping failure for DocTags)
+//   PICTURES → canned DocTags with two full-page pictures
 //   else    → canned DocTags naming the marker
 struct FakeVlm {
     httplib::Server server;
@@ -68,26 +73,66 @@ struct FakeVlm {
     // thread.
     std::mutex mutex;
     nlohmann::json last_body;
+    // The Authorization header of the most recent request ("" when absent).
+    std::string last_authorization;
+    // HOLD pages: how many are parked now, whether they may go, and how
+    // many saw their caller hang up while parked.
+    std::atomic<int> holding{0};
+    std::atomic<bool> hold_released{false};
+    std::atomic<long> held_disconnects{0};
+    // Requests open right now, and the most that were ever open at once.
+    std::atomic<int> inflight{0};
+    std::atomic<int> max_inflight{0};
 
     nlohmann::json last_request() {
         std::lock_guard<std::mutex> lock(mutex);
         return last_body;
     }
 
+    std::string authorization() {
+        std::lock_guard<std::mutex> lock(mutex);
+        return last_authorization;
+    }
+
     void start() {
         server.Post("/v1/chat/completions", [this](const httplib::Request& request,
                                                    httplib::Response& response) {
             calls++;
+            // Requests open at once, and the most ever seen.
+            const int open = ++inflight;
+            for (int seen = max_inflight.load();
+                 open > seen && !max_inflight.compare_exchange_weak(seen, open);) {
+            }
+            struct Closer {
+                std::atomic<int>& count;
+                ~Closer() { count--; }
+            } closer{inflight};
             nlohmann::json body = nlohmann::json::parse(request.body, nullptr, false);
             {
                 std::lock_guard<std::mutex> lock(mutex);
                 last_body = body;
+                last_authorization = request.get_header_value("Authorization");
             }
             std::string url = body["messages"][0]["content"][1]["image_url"]["url"];
             const std::string prefix = "data:image/png;base64,";
             require(url.starts_with(prefix), "image arrives as a data URL");
             const std::string png = base64_decode(url.substr(prefix.size()));
 
+            if (png.contains("HOLD")) {
+                // Parks like a model still generating, until released or
+                // until the caller hangs up (which it records).
+                holding++;
+                while (!hold_released.load() && !request.is_connection_closed()) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                }
+                if (!hold_released.load()) {
+                    held_disconnects++;
+                }
+                holding--;
+            }
+            if (png.contains("SLOW")) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(150));
+            }
             if (png.contains("FAIL")) {
                 response.status = 503;
                 response.set_content("{\"error\":\"model overloaded\"}", "application/json");
@@ -98,6 +143,19 @@ struct FakeVlm {
                 content = "# Converted Page\n\nA markdown paragraph.\n";
             } else if (png.contains("RAWTEXT")) {
                 content = "just plain words with no markup";
+            } else if (png.contains("PICTURES")) {
+                content =
+                    "<doctag>"
+                    "<picture><loc_0><loc_0><loc_500><loc_500></picture>"
+                    "<picture><loc_0><loc_0><loc_500><loc_500></picture>"
+                    "</doctag>";
+            } else if (png.contains("WIDETABLE")) {
+                // A table row past the column cap, as a looping model emits.
+                content = "<doctag><otsl>";
+                for (int i = 0; i < 300; i++) {
+                    content += "<fcel>x";
+                }
+                content += "<nl></otsl></doctag>";
             } else {
                 content =
                     "<doctag>"
@@ -133,12 +191,23 @@ struct FakeVlm {
     }
 
     void stop() {
+        hold_released = true;  // never park a held page on the teardown path
         server.stop();
         thread.join();
     }
 
     std::string endpoint() const { return "http://127.0.0.1:" + std::to_string(port); }
 };
+
+bool wait_until(const std::function<bool()>& condition) {
+    for (int i = 0; i < 300; i++) {  // 3 s budget, ms-scale in practice
+        if (condition()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return false;
+}
 
 struct Collected {
     std::vector<uint32_t> started;
@@ -255,6 +324,79 @@ struct TestServer {
     }
 
     void stop() { server->Shutdown(); }
+};
+
+// A stream driven the way a real client drives it: the upload runs on its
+// own thread (a server applying back-pressure blocks it) and the events are
+// collected on another, so a test can look at what has arrived while the
+// stream is still running. upload() may be called in steps.
+struct LiveStream {
+    std::unique_ptr<vlmv1::VlmConvertService::Stub> stub;
+    grpc::ClientContext context;
+    std::unique_ptr<grpc::ClientReaderWriter<vlmv1::ConvertPagesRequest,
+                                             vlmv1::ConvertPagesResponse>>
+        stream;
+    std::mutex mutex;
+    std::vector<uint32_t> started;
+    int documents = 0;
+    int raws = 0;
+    std::jthread uploader;
+    std::jthread reader;
+
+    LiveStream(const std::shared_ptr<grpc::Channel>& channel, const vlmv1::ConvertOptions& options)
+        : stub(vlmv1::VlmConvertService::NewStub(channel)) {
+        stream = stub->ConvertPages(&context);
+        vlmv1::ConvertPagesRequest request;
+        *request.mutable_options() = options;
+        stream->Write(request);
+        reader = std::jthread([this] {
+            vlmv1::ConvertPagesResponse event;
+            while (stream->Read(&event)) {
+                std::lock_guard<std::mutex> lock(mutex);
+                if (event.has_page_started()) {
+                    started.push_back(event.page_started().page_no());
+                } else if (event.has_page_document()) {
+                    documents++;
+                } else if (event.has_page_raw()) {
+                    raws++;
+                }
+            }
+        });
+    }
+
+    // Sends the pages on the uploader thread (after any earlier upload),
+    // then half-closes when `last` is set.
+    void upload(std::vector<vlmv1::PageImage> pages, bool last) {
+        if (uploader.joinable()) {
+            uploader.join();
+        }
+        uploader = std::jthread([this, pages = std::move(pages), last] {
+            vlmv1::ConvertPagesRequest request;
+            for (const vlmv1::PageImage& image : pages) {
+                request.Clear();
+                *request.mutable_page_image() = image;
+                if (!stream->Write(request)) {
+                    return;
+                }
+            }
+            if (last) {
+                stream->WritesDone();
+            }
+        });
+    }
+
+    size_t started_count() {
+        std::lock_guard<std::mutex> lock(mutex);
+        return started.size();
+    }
+
+    grpc::Status finish() {
+        if (uploader.joinable()) {
+            uploader.join();
+        }
+        reader.join();
+        return stream->Finish();
+    }
 };
 
 void verify_streaming_and_failure_isolation(const std::shared_ptr<grpc::Channel>& channel) {
@@ -424,6 +566,50 @@ void verify_alternatives(const std::shared_ptr<grpc::Channel>& channel, FakeVlm*
             "top_logprobs above 20 is INVALID_ARGUMENT");
 }
 
+// What the mapper cut to a cap rides beside the fragment on the wire; a
+// page with nothing cut carries no warning.
+void verify_page_warnings(const std::shared_ptr<grpc::Channel>& channel) {
+    vlmv1::ConvertOptions options;  // DocTags
+    Collected out = convert(channel, options, {page(1, "WIDETABLE1"), page(2, "PAGE2")});
+    require(out.status.ok() && out.documents.size() == 2, "both pages convert: " +
+                                                            out.status.error_message());
+    for (const vlmv1::PageDocument& document : out.documents) {
+        if (document.page_no() == 2) {
+            require(document.warnings_size() == 0, "an uncut page carries no warning");
+            continue;
+        }
+        require(document.warnings_size() == 1, "the cut table is reported");
+        const vlmv1::PageWarning& warning = document.warnings(0);
+        require(warning.code() == vlmv1::PAGE_WARNING_CODE_TABLE_TRUNCATED &&
+                    warning.ref() == "#/tables/0",
+                "the warning names the code and the table");
+        require(document.document().tables(0).data().num_cols() == 250,
+                "the table keeps the columns within the cap");
+    }
+}
+
+// With logprobs off (an endpoint that rejects them), calls omit the
+// parameter, and a request for alternates, which need them, fails before a
+// page is paid for.
+void verify_logprobs_off(FakeVlm* fake) {
+    vlm::Config config;
+    config.endpoint = fake->endpoint();
+    config.request_logprobs = false;
+    TestServer server(config);
+    Collected out = convert(server.channel, vlmv1::ConvertOptions(), {page(1, "PAGE1")});
+    require(out.status.ok(), "a page converts without logprobs: " + out.status.error_message());
+    require(!fake->last_request().contains("logprobs"), "the parameter is omitted");
+
+    vlmv1::ConvertOptions nbest;
+    nbest.set_top_logprobs(2);
+    const long calls_before = fake->calls.load();
+    out = convert(server.channel, nbest, {page(1, "PAGE1")});
+    require(out.status.error_code() == grpc::StatusCode::FAILED_PRECONDITION,
+            "alternates without logprobs is FAILED_PRECONDITION");
+    require(fake->calls.load() == calls_before, "no page was paid for");
+    server.stop();
+}
+
 void verify_abort_on_error(const std::shared_ptr<grpc::Channel>& channel) {    vlmv1::ConvertOptions options;
     options.set_abort_on_error(true);
     Collected out = convert(channel, options, {page(1, "PAGE1"), page(2, "FAIL2")});
@@ -449,11 +635,13 @@ void verify_error_matrix(const std::shared_ptr<grpc::Channel>& channel) {
     require(out.status.error_code() == grpc::StatusCode::INVALID_ARGUMENT,
             "non-PNG page bytes are INVALID_ARGUMENT");
 
+    // Overrides are off by default: even a malformed one is refused for
+    // being an override (verify_api_key_and_overrides covers the opt-in).
     vlmv1::ConvertOptions bad_endpoint;
     bad_endpoint.set_endpoint("not-a-url");
     out = convert(channel, bad_endpoint, {page(1, "PAGE1")});
-    require(out.status.error_code() == grpc::StatusCode::INVALID_ARGUMENT,
-            "malformed endpoint override is INVALID_ARGUMENT");
+    require(out.status.error_code() == grpc::StatusCode::PERMISSION_DENIED,
+            "an endpoint override without the operator opt-in is PERMISSION_DENIED");
 
     // Repeated options and PDF input, driven by hand.
     auto stub = vlmv1::VlmConvertService::NewStub(channel);
@@ -489,6 +677,270 @@ void verify_error_matrix(const std::shared_ptr<grpc::Channel>& channel) {
     }
 }
 
+// The operator's API key reaches the operator's endpoint and nothing else;
+// a request naming another endpoint is refused unless the operator opted
+// in, and even then never carries the key.
+void verify_api_key_and_overrides(FakeVlm* fake) {
+    const std::string key = "vlm-key-5f2a9c";
+    vlm::Config config;
+    config.endpoint = fake->endpoint();
+    config.vlm_api_key = vlm::Secret(key);
+    {
+        TestServer server(config);
+        vlmv1::ConvertOptions options;
+        Collected out = convert(server.channel, options, {page(1, "PAGE1")});
+        require(out.status.ok() && out.documents.size() == 1,
+                "keyed endpoint converts: " + out.status.error_message());
+        require(fake->authorization() == "Bearer " + key,
+                "the configured endpoint gets the bearer key");
+
+        // Naming the configured endpoint is not an override, in any
+        // spelling that reaches the same URL.
+        for (const std::string& same :
+             {fake->endpoint(), fake->endpoint() + "/", fake->endpoint() + "/v1",
+              fake->endpoint() + "/v1/chat/completions"}) {
+            options.set_endpoint(same);
+            out = convert(server.channel, options, {page(1, "PAGE1")});
+            require(out.status.ok(), "naming the configured endpoint as " + same +
+                                         " is allowed: " + out.status.error_message());
+            require(fake->authorization() == "Bearer " + key,
+                    "the key still goes to the configured endpoint");
+        }
+
+        // Any other endpoint is an override, refused before a call is made:
+        // another port, another host, the same server under another query.
+        const long calls_before = fake->calls.load();
+        for (const std::string& other :
+             {std::string("http://127.0.0.1:1"),
+              "http://127.0.0.2:" + std::to_string(fake->port),
+              fake->endpoint() + "?tenant=b"}) {
+            options.set_endpoint(other);
+            out = convert(server.channel, options, {page(1, "PAGE1")});
+            require(out.status.error_code() == grpc::StatusCode::PERMISSION_DENIED,
+                    "an override without the opt-in is PERMISSION_DENIED: " + other);
+            require(out.status.error_message().contains("GRPC_VLM_ALLOW_ENDPOINT_OVERRIDE"),
+                    "the refusal names the opt-in");
+        }
+        require(fake->calls.load() == calls_before, "a refused override reaches no endpoint");
+
+        // GetServiceInfo never carries the key.
+        auto stub = vlmv1::VlmConvertService::NewStub(server.channel);
+        grpc::ClientContext context;
+        vlmv1::GetServiceInfoResponse info;
+        require(stub->GetServiceInfo(&context, vlmv1::GetServiceInfoRequest(), &info).ok(),
+                "GetServiceInfo OK");
+        require(!info.DebugString().contains(key), "GetServiceInfo does not carry the key");
+        server.stop();
+    }
+
+    config.allow_endpoint_override = true;
+    {
+        TestServer server(config);
+        // Same server, different URL (a query the fake ignores): an
+        // override, so no key.
+        vlmv1::ConvertOptions options;
+        options.set_endpoint(fake->endpoint() + "?tenant=b");
+        Collected out = convert(server.channel, options, {page(1, "PAGE1")});
+        require(out.status.ok(), "an allowed override converts: " + out.status.error_message());
+        require(fake->authorization().empty(), "an override never receives the operator's key");
+
+        vlmv1::ConvertOptions malformed;
+        malformed.set_endpoint("not-a-url");
+        out = convert(server.channel, malformed, {page(1, "PAGE1")});
+        require(out.status.error_code() == grpc::StatusCode::INVALID_ARGUMENT,
+                "a malformed allowed override is INVALID_ARGUMENT");
+        server.stop();
+    }
+}
+
+// A client that cancels (or whose deadline passes) while its page is still
+// in the model gets the VLM call cut: the endpoint sees the hang-up and the
+// RPC thread is released, instead of waiting out the call and its retries.
+void verify_cancel_reaches_inflight_call(FakeVlm* fake) {
+    vlm::Config config;
+    config.endpoint = fake->endpoint();
+    config.concurrency = 1;
+    config.vlm_timeout_seconds = 60;
+    TestServer server(config);
+    fake->hold_released = false;
+    const long disconnects_before = fake->held_disconnects.load();
+
+    auto stub = vlmv1::VlmConvertService::NewStub(server.channel);
+    grpc::ClientContext context;
+    auto stream = stub->ConvertPages(&context);
+    vlmv1::ConvertPagesRequest request;
+    *request.mutable_options() = vlmv1::ConvertOptions();
+    stream->Write(request);
+    request.Clear();
+    *request.mutable_page_image() = page(1, "HOLD-1");
+    stream->Write(request);
+    const bool parked = wait_until([&] { return fake->holding.load() > 0; });
+
+    context.TryCancel();
+    vlmv1::ConvertPagesResponse event;
+    while (stream->Read(&event)) {
+    }
+    const grpc::Status status = stream->Finish();
+    const bool cut = wait_until([&] { return fake->held_disconnects.load() > disconnects_before; });
+    // Release before any assertion can throw, so a failure never leaves
+    // the server waiting on a parked page.
+    fake->hold_released = true;
+    require(parked, "the page reached the model");
+    require(status.error_code() == grpc::StatusCode::CANCELLED, "the stream is cancelled");
+    require(cut, "the cancel reached the VLM call in flight");
+    server.stop();
+}
+
+// Pages of one fixed size, so a byte budget translates into a page count.
+std::vector<vlmv1::PageImage> sized_pages(uint32_t first, uint32_t count,
+                                          const std::string& first_marker) {
+    std::vector<vlmv1::PageImage> pages;
+    for (uint32_t i = 0; i < count; i++) {
+        const uint32_t page_no = first + i;
+        std::string marker = i == 0 ? first_marker : "PAGE-";
+        marker += std::to_string(page_no % 10);
+        pages.push_back(page(page_no, marker));
+    }
+    return pages;
+}
+
+// One stream holds at most max_stream_buffered_bytes of pages read but not
+// yet answered. With a page parked in the model and room for two, the
+// server admits two and reads nothing more until the budget frees, however
+// much the client has sent; then every page still converts.
+void verify_stream_backpressure(FakeVlm* fake) {
+    const std::vector<vlmv1::PageImage> pages = sized_pages(1, 6, "HOLD-");
+    vlm::Config config;
+    config.endpoint = fake->endpoint();
+    config.concurrency = 1;
+    config.max_stream_buffered_bytes = 2 * pages[0].png().size();
+    TestServer server(config);
+    fake->hold_released = false;
+
+    LiveStream live(server.channel, vlmv1::ConvertOptions());
+    live.upload(pages, /*last=*/true);
+    const bool parked = wait_until([&] { return fake->holding.load() > 0; });
+    // Two fit; then give an unbounded reader room to run ahead.
+    wait_until([&] { return live.started_count() >= 2; });
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    const size_t started_while_parked = live.started_count();
+    fake->hold_released = true;
+    const grpc::Status status = live.finish();
+
+    require(parked, "page 1 reached the model");
+    require(started_while_parked == 2,
+            "the stream admits only what its budget holds while page 1 is parked: " +
+                std::to_string(started_while_parked) + " started");
+    require(status.ok() && live.documents == 6, "every page converts once the budget frees: " +
+                                                    status.error_message());
+    require(server.service->buffered_bytes().in_use() == 0,
+            "every page's bytes are back in the process budget");
+    server.stop();
+}
+
+// The process-wide budget holds across streams: with a parked stream
+// filling it, a second stream's first page waits, then converts.
+void verify_process_backpressure(FakeVlm* fake) {
+    const std::vector<vlmv1::PageImage> first = sized_pages(1, 3, "HOLD-");
+    const std::vector<vlmv1::PageImage> second = sized_pages(11, 2, "PAGE-");
+    vlm::Config config;
+    config.endpoint = fake->endpoint();
+    config.concurrency = 1;
+    config.max_buffered_bytes = 2 * first[0].png().size();
+    TestServer server(config);
+    fake->hold_released = false;
+
+    LiveStream a(server.channel, vlmv1::ConvertOptions());
+    a.upload(first, /*last=*/true);
+    const bool parked = wait_until([&] { return fake->holding.load() > 0; });
+    wait_until([&] { return a.started_count() >= 2; });
+    LiveStream b(server.channel, vlmv1::ConvertOptions());
+    b.upload(second, /*last=*/true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    const size_t a_started = a.started_count();
+    const size_t b_started = b.started_count();
+    fake->hold_released = true;
+    const grpc::Status a_status = a.finish();
+    const grpc::Status b_status = b.finish();
+
+    require(parked, "stream A's first page reached the model");
+    require(a_started == 2, "stream A fills the process budget: " + std::to_string(a_started));
+    require(b_started == 0, "stream B waits for the process budget: " +
+                                std::to_string(b_started));
+    require(a_status.ok() && a.documents == 3, "stream A converts: " + a_status.error_message());
+    require(b_status.ok() && b.documents == 2, "stream B converts: " + b_status.error_message());
+    require(server.service->buffered_bytes().in_use() == 0, "the process budget drains");
+    server.stop();
+}
+
+// GRPC_VLM_MAX_INFLIGHT bounds the calls every stream together has open on
+// the endpoint, whatever each stream's own concurrency.
+void verify_process_inflight_cap(FakeVlm* fake) {
+    vlm::Config config;
+    config.endpoint = fake->endpoint();
+    config.concurrency = 2;
+    config.max_inflight = 1;
+    TestServer server(config);
+    fake->max_inflight = 0;
+
+    vlmv1::ConvertOptions options;
+    options.set_concurrency(2);
+    LiveStream a(server.channel, options);
+    LiveStream b(server.channel, options);
+    a.upload({page(1, "SLOW-1"), page(2, "SLOW-2")}, /*last=*/true);
+    b.upload({page(1, "SLOW-3"), page(2, "SLOW-4")}, /*last=*/true);
+    const grpc::Status a_status = a.finish();
+    const grpc::Status b_status = b.finish();
+
+    require(a_status.ok() && a.documents == 2, "stream A converts: " + a_status.error_message());
+    require(b_status.ok() && b.documents == 2, "stream B converts: " + b_status.error_message());
+    require(fake->max_inflight.load() == 1, "never more than one call open on the endpoint: " +
+                                                std::to_string(fake->max_inflight.load()));
+    require(server.service->vlm_slots().in_use() == 0, "every slot is given back");
+    server.stop();
+}
+
+// Once a stream is going to fail, pages nobody will receive are not paid
+// for: abort_on_error stops dispatching after the first failed page, and a
+// bad page mid-stream cuts the call in flight and skips the queue.
+void verify_failure_stops_dispatch(FakeVlm* fake) {
+    vlm::Config config;
+    config.endpoint = fake->endpoint();
+    config.concurrency = 1;
+    TestServer server(config);
+
+    vlmv1::ConvertOptions abort_options;
+    abort_options.set_abort_on_error(true);
+    long calls_before = fake->calls.load();
+    Collected out = convert(server.channel, abort_options,
+                            {page(1, "FAIL-1"), page(2, "PAGE-2"), page(3, "PAGE-3"),
+                             page(4, "PAGE-4")});
+    require(out.status.error_code() == grpc::StatusCode::ABORTED, "the stream aborts");
+    require(fake->calls.load() - calls_before == 6,
+            "only the failed page's 6 attempts reach the endpoint: " +
+                std::to_string(fake->calls.load() - calls_before));
+
+    fake->hold_released = false;
+    const long disconnects_before = fake->held_disconnects.load();
+    calls_before = fake->calls.load();
+    LiveStream live(server.channel, vlmv1::ConvertOptions());
+    live.upload({page(1, "HOLD-1"), page(2, "PAGE-2"), page(3, "PAGE-3")}, /*last=*/false);
+    const bool parked = wait_until([&] { return fake->holding.load() > 0; });
+    vlmv1::PageImage not_png = page(4, "PAGE-4");
+    not_png.set_png("plain bytes, not a png");
+    live.upload({not_png}, /*last=*/true);
+    const grpc::Status status = live.finish();
+    const bool cut = wait_until([&] { return fake->held_disconnects.load() > disconnects_before; });
+    fake->hold_released = true;
+    require(parked, "page 1 reached the model");
+    require(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT, "the bad page fails it");
+    require(cut, "the call in flight is cut");
+    require(fake->calls.load() - calls_before == 1, "queued pages never reach the endpoint: " +
+                                                        std::to_string(fake->calls.load() -
+                                                                       calls_before));
+    server.stop();
+}
+
 void verify_no_endpoint() {
     vlm::Config config;
     config.endpoint = "";
@@ -509,6 +961,41 @@ void verify_page_byte_cap() {
     Collected out = convert(server.channel, options, {page(1, "PAGE1-WELL-OVER-THE-CAP")});
     require(out.status.error_code() == grpc::StatusCode::RESOURCE_EXHAUSTED,
             "over-cap page is RESOURCE_EXHAUSTED");
+    server.stop();
+}
+
+// The operator's inline crop cap reaches the mapper: a page whose crops
+// would outgrow it keeps its pictures, attaches what fits, and says what
+// it skipped, instead of sending a PageDocument the client cannot receive.
+void verify_page_crop_byte_cap(FakeVlm* fake) {
+    // A real 4x3 grayscale PNG (stb decodes it for the crops) with the
+    // fake's marker after IEND, where decoders stop reading.
+    const std::string gray = base64_decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAQAAAADCAAAAACRn/EaAAAAF0lEQVR4nGNg4BKRY9AwsnFjCIhKyQMADI8C"
+        "lWcdFq8AAAAASUVORK5CYII=");
+    docv1::ImageRef full_page;
+    require(vlm::mapping::crop_png_image(gray, 0, 0, 4, 3, 4, 3, &full_page),
+            "the fixture raster crops");
+    vlm::Config config;
+    config.endpoint = fake->endpoint();
+    config.max_page_crop_bytes = full_page.uri().size();  // one full-page crop fits
+    TestServer server(config);
+    vlmv1::PageImage image;
+    image.set_page_no(1);
+    image.set_png(gray + "PICTURES");
+    image.set_width(4);
+    image.set_height(3);
+    Collected out = convert(server.channel, vlmv1::ConvertOptions(), {image});
+    require(out.status.ok() && out.documents.size() == 1,
+            "the page converts: " + out.status.error_message());
+    const vlmv1::PageDocument& document = out.documents[0];
+    require(document.document().pictures_size() == 2, "both pictures are kept");
+    require(document.document().pictures(0).has_image() &&
+                !document.document().pictures(1).has_image(),
+            "only the crop within the configured cap is attached");
+    require(document.warnings_size() == 1 &&
+                document.warnings(0).code() == vlmv1::PAGE_WARNING_CODE_PICTURE_IMAGES_SKIPPED,
+            "the skipped crop is reported as a typed warning");
     server.stop();
 }
 
@@ -544,6 +1031,20 @@ void verify_service_info(const std::shared_ptr<grpc::Channel>& channel,
     require(info2.raw_presets_size() == 1 && info2.raw_presets(0) == "unlimited-ocr",
             "unknown preset names are reported raw");
     server.stop();
+
+    // The RPC is unauthenticated: an endpoint whose path and query carry a
+    // tenant token is reported as scheme, host and port only.
+    vlm::Config secret_path;
+    secret_path.endpoint = endpoint + "/tenant/PATH-SECRET?key=QUERY-SECRET";
+    TestServer server3(secret_path);
+    auto stub3 = vlmv1::VlmConvertService::NewStub(server3.channel);
+    grpc::ClientContext context3;
+    vlmv1::GetServiceInfoResponse info3;
+    require(stub3->GetServiceInfo(&context3, request, &info3).ok(), "GetServiceInfo OK (3)");
+    require(info3.endpoint() == endpoint, "the reported endpoint is the origin: " +
+                                              info3.endpoint());
+    require(!info3.DebugString().contains("SECRET"), "no part of the token is reported");
+    server3.stop();
 }
 
 }  // namespace
@@ -568,10 +1069,19 @@ int main() {
         verify_markdown_and_raw_fallback(server.channel);
         verify_stop_and_max_tokens(server.channel, &fake);
         verify_alternatives(server.channel, &fake);
+        verify_page_warnings(server.channel);
+        verify_logprobs_off(&fake);
         verify_abort_on_error(server.channel);
         verify_error_matrix(server.channel);
+        verify_api_key_and_overrides(&fake);
+        verify_cancel_reaches_inflight_call(&fake);
+        verify_stream_backpressure(&fake);
+        verify_process_backpressure(&fake);
+        verify_process_inflight_cap(&fake);
+        verify_failure_stops_dispatch(&fake);
         verify_no_endpoint();
         verify_page_byte_cap();
+        verify_page_crop_byte_cap(&fake);
         verify_service_info(server.channel, fake.endpoint());
 
         require(server.service->converted.load() > 0, "converted counter moved");

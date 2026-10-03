@@ -1,9 +1,11 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 #include "ai/pipestream/document/v1/document.pb.h"
 #include "ai/pipestream/vlm/v1/vlm_convert.pb.h"
+#include "image_crop.h"
 
 namespace vlm::mapping {
 
@@ -21,6 +23,9 @@ struct PageContext {
     // crops picture regions out of it for ImageRef attachments. Empty for
     // mappers/tests that have no image.
     std::string png;
+    // What the DocTags mapper may spend cropping pictures out of `png`;
+    // the service sets the inline byte cap from GRPC_VLM_MAX_PAGE_CROP_BYTES.
+    CropBudget crops;
     // Collector attribution stamped on every item ("vlm-convert", the
     // model name, this server's version, and the page's raw model score
     // when the endpoint reported logprobs).
@@ -44,18 +49,21 @@ struct PageContext {
 // Maps one page's model response into a Document fragment. Returns true
 // with `out` filled; returns false with `error` set when the text does
 // not parse as the declared format — the caller then emits PageRaw.
+// `warnings`, when given, collects what the fragment cut to a server cap
+// (a table past the size caps, ...); the caller sends them beside it.
 bool map_response(vlmv1::ResponseFormat format, const std::string& text,
-                  const PageContext& page, docv1::Document* out, std::string* error);
+                  const PageContext& page, docv1::Document* out, std::string* error,
+                  std::vector<vlmv1::PageWarning>* warnings = nullptr);
 
 // Individual format mappers, exposed for unit tests. Same contract.
 bool map_doctags(const std::string& text, const PageContext& page, docv1::Document* out,
-                 std::string* error);
+                 std::string* error, std::vector<vlmv1::PageWarning>* warnings = nullptr);
 bool map_markdown(const std::string& text, const PageContext& page, docv1::Document* out,
-                  std::string* error);
+                  std::string* error, std::vector<vlmv1::PageWarning>* warnings = nullptr);
 bool map_html(const std::string& text, const PageContext& page, docv1::Document* out,
-              std::string* error);
+              std::string* error, std::vector<vlmv1::PageWarning>* warnings = nullptr);
 bool map_otsl(const std::string& text, const PageContext& page, docv1::Document* out,
-              std::string* error);
+              std::string* error, std::vector<vlmv1::PageWarning>* warnings = nullptr);
 bool map_plaintext(const std::string& text, const PageContext& page, docv1::Document* out,
                    std::string* error);
 

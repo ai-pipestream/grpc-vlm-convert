@@ -51,19 +51,31 @@ Configuration is entirely `GRPC_VLM_*` environment variables:
 | Variable | Default | Meaning |
 |---|---|---|
 | `GRPC_VLM_LISTEN_ADDRESS` | `0.0.0.0:50058` | gRPC listen address |
-| `GRPC_VLM_ENDPOINT` | *(empty)* | OpenAI-compatible VLM endpoint. Empty is legal at startup; `ConvertPages` then needs a per-request endpoint or fails `FAILED_PRECONDITION` |
+| `GRPC_VLM_ENDPOINT` | *(empty)* | OpenAI-compatible VLM endpoint, `http://` only: a base (`http://vlm:8080`, an optional path prefix allowed) gets `/v1/chat/completions` appended, an OpenAI-style base ending in `/v1` gets `/chat/completions`, and a full `.../chat/completions` URL (Docling's `ApiVlmOptions.url`) is used as is; a query string rides along. No `user:password@` part. Checked at startup. Logs, errors and `GetServiceInfo` show only its scheme, host and port, never its path or query. Empty is legal at startup; `ConvertPages` then fails `FAILED_PRECONDITION` unless overrides are allowed and the request names an endpoint |
+| `GRPC_VLM_API_KEY` | *(empty)* | Bearer key for the configured endpoint, sent as `Authorization: Bearer <key>`. Never logged, returned or echoed, and never sent to an endpoint a request named. It crosses the network in clear text over `http://`: keep the VLM on a trusted network or behind a TLS proxy |
+| `GRPC_VLM_ALLOW_ENDPOINT_OVERRIDE` | `false` | `true` lets `ConvertOptions.endpoint` point a stream at another endpoint. Off, a request naming any endpoint other than the configured one fails `PERMISSION_DENIED` (spellings that reach the same URL, such as a trailing slash or an uppercase host, are the configured one): an override lets every caller make this server POST to any host it can reach and read the answer back |
+| `GRPC_VLM_LOGPROBS` | `true` | Ask the endpoint for `"logprobs": true` (the page's mean token log-probability). `false` omits the parameter for servers that reject it with a 400; a request for `top_logprobs` then fails `FAILED_PRECONDITION` |
 | `GRPC_VLM_PRESETS` | *(all built-ins)* | Comma list of preset names the endpoint claims to serve, reported by `GetServiceInfo`. Built-ins: `smoldocling`, `granite-docling`, `got-ocr-2`, `granite-vision`, `deepseek-ocr`, `nanonets-ocr2`, `glm-ocr`, `lighton-ocr`, `north-micro-vision` (see `serving/north-micro-vision/` for an open-source endpoint that serves the last one on NVIDIA, Intel XPU or CPU) |
-| `GRPC_VLM_CONCURRENCY` | `2` | Pages in flight against the VLM per stream |
+| `GRPC_VLM_CONCURRENCY` | `2` | Pages in flight against the VLM per stream (all streams together are capped by `GRPC_VLM_MAX_INFLIGHT`) |
+| `GRPC_VLM_MAX_INFLIGHT` | `8` | VLM calls in flight across every stream: the endpoint's capacity is per server, not per stream. A call past it waits here, its timeout not yet running |
 | `GRPC_VLM_MAX_PAGE_BYTES` | `33554432` | Per-page PNG cap (`RESOURCE_EXHAUSTED`) |
 | `GRPC_VLM_MAX_PAGES` | `512` | Per-stream page cap (`RESOURCE_EXHAUSTED`) |
-| `GRPC_VLM_VLM_TIMEOUT_SECONDS` | `300` | Deadline for one page's VLM call |
+| `GRPC_VLM_MAX_PAGE_CROP_BYTES` | `3145728` | Bytes of picture crops one `PageDocument` carries inline (as data URIs), so a picture-heavy page stays under the 4 MiB receive limit gRPC clients default to. Once a crop would cross it, that picture and the page's later ones go without an image and the page carries a `PAGE_WARNING_CODE_PICTURE_IMAGES_SKIPPED` warning. At least 1024 |
+| `GRPC_VLM_MAX_STREAM_BUFFERED_BYTES` | 4 × `GRPC_VLM_MAX_PAGE_BYTES` | Bytes of page images one stream may hold read but not yet answered (queued or in flight). At the cap the server stops reading that stream, so gRPC flow control holds the client back. At least `GRPC_VLM_MAX_PAGE_BYTES`. Converted pages the client has not read yet are not counted and not bounded: read events while uploading (see `docs/design.md`) |
+| `GRPC_VLM_MAX_BUFFERED_BYTES` | 16 × `GRPC_VLM_MAX_PAGE_BYTES` | The same bound across every stream on both transports. At least `GRPC_VLM_MAX_PAGE_BYTES` |
+| `GRPC_VLM_VLM_TIMEOUT_SECONDS` | `300` | Wall-clock budget for one page's whole VLM call: every attempt and every retry backoff spend from it, and an endpoint that drips bytes cannot stretch it. A cancelled stream or an expired client deadline ends the call sooner, mid-attempt included |
 | `GRPC_VLM_METRICS_INTERVAL_SECONDS` | `60` | Stdout metrics line interval, 0 disables |
 | `GRPC_VLM_HTTP_PORT` | `50059` | HTTP/JSON front-end port; `0` or empty disables the listener |
+| `GRPC_VLM_HTTP_HOST` | `127.0.0.1` | Address the HTTP front end binds. Any non-loopback host (`0.0.0.0` in a container) requires `GRPC_VLM_HTTP_TOKEN`, or the server refuses to start |
+| `GRPC_VLM_HTTP_TOKEN` | *(empty)* | Bearer token every HTTP convert request must carry (`Authorization: Bearer <token>`); `/healthz` stays open. Wrong or missing is 401, checked before the body is read. Never logged |
+| `GRPC_VLM_HTTP_MAX_BODY_BYTES` | `67108864` | Largest HTTP request body; a larger one is 413 before more than this is read. The front end holds a request several times over (body, JSON, protobuf), so this bounds its memory per request: send big documents over gRPC |
 
 ## HTTP API
 
 Alongside gRPC, the same binary serves an HTTP/JSON front end on
-`GRPC_VLM_HTTP_PORT`. It drives the identical ConvertPages pipeline: the
+`GRPC_VLM_HTTP_HOST`:`GRPC_VLM_HTTP_PORT`, loopback by default (any other
+host needs `GRPC_VLM_HTTP_TOKEN`, sent as `Authorization: Bearer
+<token>`). It drives the identical ConvertPages pipeline: the
 envelope is plain JSON, but every message body is canonical proto3 JSON
 (protobuf `MessageToJsonString` / `JsonStringToMessage`, camelCase field
 names, base64 bytes), never hand-mapped.
@@ -81,7 +93,10 @@ curl -s http://localhost:50059/v1/convert -d '{
 ```
 
 Errors keep the gRPC matrix: 400 on `INVALID_ARGUMENT` (bad JSON, page_no
-0, non-PNG bytes), 413 on `RESOURCE_EXHAUSTED`, 501 on `UNIMPLEMENTED`
+0, non-PNG bytes), 401 on a missing or wrong token, 403 on
+`PERMISSION_DENIED` (an endpoint override the server does not allow), 413
+on `RESOURCE_EXHAUSTED` or a body over `GRPC_VLM_HTTP_MAX_BODY_BYTES`, 501
+on `UNIMPLEMENTED`
 (PDF input), 500 otherwise. The body still carries the events collected
 before the failure plus an `error` object:
 
@@ -102,6 +117,9 @@ curl -sN http://localhost:50059/v1/convert/stream -d '{"options": {}, "pages": [
 # {"complete":{"pagesStarted":1,"pagesOk":1}}
 ```
 
+A caller that hangs up stops its conversion on either route: queued pages
+are skipped and the VLM call in flight is cut, so nothing more is paid for.
+
 `GET /healthz` returns `200 ok`.
 
 ## gRPC stream
@@ -110,7 +128,9 @@ Clients stream `ConvertPagesRequest` (one `ConvertOptions`, then one
 `PageImage` PNG per page) and receive `PageStarted` / `PageDocument` /
 `PageRaw` events per page in completion order: a page is emitted the
 moment its VLM call returns, out-of-order pages are legal and key on
-`page_no`. A `ConvertComplete` trailer closes the stream. Health
+`page_no`. A `PageDocument` lists anything cut to a server cap as typed
+`PageWarning`s beside its fragment (a table past the row, column or cell
+caps, ...). A `ConvertComplete` trailer closes the stream. Health
 (`grpc.health.v1.Health`) and server reflection are registered.
 `GetServiceInfo` also carries a `UiInfo` block (title, path,
 description) advertising this service's tab to the shared demo shell.

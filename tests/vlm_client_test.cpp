@@ -5,7 +5,11 @@
 // attempt counts are the assertions, not the wall-clock delays.
 
 #include <atomic>
+#include <chrono>
 #include <cmath>
+#include <functional>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -34,18 +38,38 @@ struct ScriptableVlm {
     // The top_logprobs value the last request asked for, -1 when the
     // request omitted the parameter.
     std::atomic<int> asked_top_logprobs{-1};
+    // The last request's "logprobs": 1 true, 0 false, -1 omitted.
+    std::atomic<int> asked_logprobs{-1};
+    // The request target (path and query) of the last call, as it arrived.
+    std::mutex target_mutex;
+    std::string last_target;
+    // Set when a parked /hang call saw its caller hang up.
+    std::atomic<bool> hang_saw_disconnect{false};
+
+    std::string target() {
+        std::lock_guard<std::mutex> lock(target_mutex);
+        return last_target;
+    }
 
     void start() {
-        // The same completions handler under a base path: split_endpoint
-        // must post to {prefix}/v1/chat/completions for prefixed endpoints.
+        // The same completions handler under a base path: the client must
+        // post to {prefix}/v1/chat/completions for prefixed endpoints, and
+        // to {base}/chat/completions for an OpenAI-style base ending in /v1.
         const auto handler = [this](const httplib::Request& request,
                                     httplib::Response& response) {
             attempts++;
+            {
+                std::lock_guard<std::mutex> lock(target_mutex);
+                last_target = request.target;
+            }
             const nlohmann::json asked =
                 nlohmann::json::parse(request.body, nullptr, false);
             asked_top_logprobs = asked.is_object() && asked.contains("top_logprobs")
                                      ? asked["top_logprobs"].get<int>()
                                      : -1;
+            asked_logprobs = asked.is_object() && asked.contains("logprobs")
+                                 ? (asked["logprobs"].get<bool>() ? 1 : 0)
+                                 : -1;
             if (failures_before_success.load() > 0) {
                 failures_before_success--;
                 response.status = failure_status.load();
@@ -87,6 +111,48 @@ struct ScriptableVlm {
         };
         server.Post("/v1/chat/completions", handler);
         server.Post("/base/v1/chat/completions", handler);
+        server.Post("/gw/v1/chat/completions", handler);
+
+        // A slow drip: one byte every 100 ms keeps every socket read alive,
+        // so only a whole-call budget ends the call.
+        server.Post("/drip/v1/chat/completions",
+                    [](const httplib::Request&, httplib::Response& response) {
+                        auto started = std::make_shared<std::chrono::steady_clock::time_point>(
+                            std::chrono::steady_clock::now());
+                        response.set_chunked_content_provider(
+                            "application/json", [started](size_t, httplib::DataSink& sink) {
+                                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                                if (std::chrono::steady_clock::now() - *started >
+                                    std::chrono::seconds(20)) {
+                                    sink.done();
+                                    return true;
+                                }
+                                return sink.write(" ", 1);
+                            });
+                    });
+        // A model that never answers: the handler parks until the caller
+        // hangs up, and records that it saw the connection close.
+        server.Post("/hang/v1/chat/completions",
+                    [this](const httplib::Request& request, httplib::Response& response) {
+                        attempts++;
+                        const auto started = std::chrono::steady_clock::now();
+                        while (!request.is_connection_closed() &&
+                               std::chrono::steady_clock::now() - started <
+                                   std::chrono::seconds(20)) {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                        }
+                        if (request.is_connection_closed()) {
+                            hang_saw_disconnect = true;
+                        }
+                        response.status = 503;
+                    });
+        // A busy model: 400 ms per attempt, then 503 (retryable).
+        server.Post("/slow503/v1/chat/completions",
+                    [this](const httplib::Request&, httplib::Response& response) {
+                        attempts++;
+                        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+                        response.status = 503;
+                    });
         port = server.bind_to_any_port("127.0.0.1");
         require(port > 0, "fake VLM bound");
         thread = std::thread([this] { server.listen_after_bind(); });
@@ -111,6 +177,93 @@ vlm::VlmCall call_to(const std::string& endpoint) {
             .timeout_seconds = 5};
 }
 
+bool wait_until(const std::function<bool()>& condition) {
+    for (int i = 0; i < 300; i++) {  // 3 s budget, ms-scale in practice
+        if (condition()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return false;
+}
+
+std::chrono::milliseconds elapsed_since(std::chrono::steady_clock::time_point started) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started);
+}
+
+// The timeout is a budget for the whole call and the caller's probe ends
+// it at any point: mid-wait on a model that has not answered, mid-drip,
+// between retries, or before anything is sent.
+void verify_budget_and_cancellation(ScriptableVlm& fake) {
+    {
+        vlm::VlmCall drip = call_to(fake.endpoint() + "/drip");
+        drip.timeout_seconds = 1;
+        const auto started = std::chrono::steady_clock::now();
+        const vlm::VlmResult dripped = vlm::generate(drip);
+        require(!dripped.ok && dripped.error.contains("budget"),
+                "a dripping endpoint fails on the budget: " + dripped.error);
+        require(elapsed_since(started) < std::chrono::seconds(4),
+                "a byte every 100 ms does not stretch the call past its budget");
+    }
+    {
+        fake.attempts = 0;
+        vlm::VlmCall slow = call_to(fake.endpoint() + "/slow503");
+        slow.timeout_seconds = 1;
+        const auto started = std::chrono::steady_clock::now();
+        const vlm::VlmResult spent = vlm::generate(slow);
+        require(!spent.ok && spent.error.contains("budget"),
+                "retries end when the budget does: " + spent.error);
+        require(fake.attempts.load() < 6, "the budget, not the retry count, ended the call");
+        require(elapsed_since(started) < std::chrono::milliseconds(2500),
+                "retries and backoff spend from one budget");
+    }
+    {
+        // Parked on a model that has not answered: no bytes move, so only
+        // the watchdog can end it, and the endpoint sees the hang-up.
+        fake.hang_saw_disconnect = false;
+        std::atomic<bool> leave{false};
+        vlm::VlmCall hung = call_to(fake.endpoint() + "/hang");
+        hung.timeout_seconds = 30;
+        hung.cancelled = [&leave] { return leave.load(); };
+        std::jthread timer([&leave] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            leave = true;
+        });
+        const auto started = std::chrono::steady_clock::now();
+        const vlm::VlmResult cut = vlm::generate(hung);
+        require(!cut.ok && cut.cancelled, "a cancelled call says so: " + cut.error);
+        require(elapsed_since(started) < std::chrono::seconds(3),
+                "the cancel reaches an attempt parked on the model");
+        require(wait_until([&] { return fake.hang_saw_disconnect.load(); }),
+                "the endpoint sees the connection close");
+    }
+    {
+        // Cancelled between attempts: no further attempt is made.
+        fake.attempts = 0;
+        std::atomic<bool> leave{false};
+        vlm::VlmCall busy = call_to(fake.endpoint() + "/slow503");
+        busy.timeout_seconds = 30;
+        busy.cancelled = [&leave] { return leave.load(); };
+        std::jthread timer([&] {
+            wait_until([&] { return fake.attempts.load() >= 1; });
+            leave = true;
+        });
+        const vlm::VlmResult cut = vlm::generate(busy);
+        require(!cut.ok && cut.cancelled, "a cancel between retries ends the call");
+        require(fake.attempts.load() <= 2, "no attempt starts after the cancel");
+    }
+    {
+        // A caller that already left gets nothing sent on its behalf.
+        fake.attempts = 0;
+        vlm::VlmCall gone = call_to(fake.endpoint());
+        gone.cancelled = [] { return true; };
+        const vlm::VlmResult nothing = vlm::generate(gone);
+        require(!nothing.ok && nothing.cancelled, "an already-cancelled call is cancelled");
+        require(fake.attempts.load() == 0, "nothing reaches the endpoint");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -122,14 +275,98 @@ int main() {
         // optional path prefix allowed.
         require(vlm::endpoint_error("http://vlm:8080").empty(), "plain origin validates");
         require(vlm::endpoint_error("http://vlm:8080/base").empty(), "path prefix validates");
+        require(vlm::endpoint_error("http://vlm").empty(), "a port is optional");
+        require(vlm::endpoint_error("http://[::1]:8080").empty(), "bracketed IPv6 validates");
+        require(vlm::endpoint_error("http://vlm:8080/v1/chat/completions?api-version=2").empty(),
+                "a full completions URL with a query validates");
         require(!vlm::endpoint_error("https://vlm:8080").empty(), "https is rejected");
         require(!vlm::endpoint_error("http://").empty(), "scheme without a host is rejected");
         require(!vlm::endpoint_error("vlm:8080").empty(), "missing scheme is rejected");
+        // What httplib would take apart wrongly (and then dereference a null
+        // client for) is refused up front.
+        for (const char* broken : {"http://vlm:abc", "http://vlm:0", "http://vlm:99999",
+                                   "http://vlm:", "http://[::1", "http://vl m:8080",
+                                   "http://vlm:8080/a b", "http://vlm\n:8080"}) {
+            require(!vlm::endpoint_error(broken).empty(),
+                    std::string("malformed endpoint is rejected: ") + broken);
+        }
+        // Credentials in the URL are refused, and the reason never repeats
+        // them.
+        const std::string with_userinfo = "http://alice:hunter2@vlm:8080/v1";
+        const std::string userinfo_error = vlm::endpoint_error(with_userinfo);
+        require(!userinfo_error.empty(), "userinfo is rejected");
+        require(!userinfo_error.contains("hunter2") && !userinfo_error.contains("alice"),
+                "the rejection does not echo the credentials: " + userinfo_error);
+        require(!vlm::endpoint_error("http://vlm:8080/tenant/SECRET-TOKEN x").contains(
+                    "SECRET-TOKEN"),
+                "a rejection never quotes the endpoint");
+
+        // Endpoint identity is where a call lands, not how it is spelled:
+        // the service lets a request name the configured endpoint in any
+        // of these without it counting as an override.
+        for (const char* same : {"http://vlm:8080", "http://vlm:8080/", "http://VLM:8080",
+                                 "http://vlm:08080", "http://vlm:8080/v1", "http://vlm:8080/v1/",
+                                 "http://vlm:8080/v1/chat/completions",
+                                 "http://vlm:8080/v1/chat/completions/", "http://vlm:8080#frag"}) {
+            require(vlm::same_endpoint("http://vlm:8080", same),
+                    std::string("an equivalent spelling is the same endpoint: ") + same);
+        }
+        require(vlm::same_endpoint("http://vlm", "http://vlm:80"), "an absent port is 80");
+        require(vlm::same_endpoint("http://[::ABCD]:8080", "http://[::abcd]:8080/"),
+                "IPv6 hex digits compare case-blind");
+        require(vlm::same_endpoint("http://vlm:8080/base?t=a", "http://vlm:8080/base/?t=a"),
+                "a path prefix and query survive a trailing slash");
+        for (const char* other : {"http://vlm2:8080", "http://vlm:8081", "http://vlm",
+                                  "http://vlm:8080/base", "http://vlm:8080?tenant=b",
+                                  "http://vlm:8080/V1"}) {
+            require(!vlm::same_endpoint("http://vlm:8080", other),
+                    std::string("a different host, port, path or query is another endpoint: ") +
+                        other);
+        }
+        require(!vlm::same_endpoint("http://vlm:8080", "https://vlm:8080") &&
+                    !vlm::same_endpoint("not-a-url", "not-a-url"),
+                "an endpoint that does not parse matches nothing, itself included");
+
+        // A bad port is an error result, not a crash (httplib leaves its
+        // client null when the port does not parse).
+        vlm::VlmResult bad_port = vlm::generate(call_to("http://127.0.0.1:99999"));
+        require(!bad_port.ok && !bad_port.error.empty(), "a bad port fails cleanly");
 
         // A path-prefixed endpoint posts under the prefix.
         vlm::VlmResult prefixed = vlm::generate(call_to(fake.endpoint() + "/base"));
         require(prefixed.ok, "prefixed endpoint resolves: " + prefixed.error);
         require(prefixed.text == "<doctag/>", "prefixed endpoint answer");
+        require(fake.target() == "/base/v1/chat/completions", "prefix gets the whole route");
+
+        // A Docling-style full completions URL is used as is, never with
+        // a second /v1/chat/completions on the end.
+        vlm::VlmResult full = vlm::generate(call_to(fake.endpoint() + "/v1/chat/completions"));
+        require(full.ok, "a full completions URL resolves: " + full.error);
+        require(fake.target() == "/v1/chat/completions", "a full URL is not doubled");
+        full = vlm::generate(call_to(fake.endpoint() + "/base/v1/chat/completions/"));
+        require(full.ok && fake.target() == "/base/v1/chat/completions",
+                "a full URL with a prefix and a trailing slash is used as is");
+
+        // An OpenAI-style base (ending in /v1) gets only the rest of the
+        // route.
+        vlm::VlmResult openai_base = vlm::generate(call_to(fake.endpoint() + "/gw/v1"));
+        require(openai_base.ok, "an OpenAI-style base resolves: " + openai_base.error);
+        require(fake.target() == "/gw/v1/chat/completions", "a /v1 base is not doubled");
+
+        // A query string rides along on the request.
+        vlm::VlmResult queried = vlm::generate(call_to(fake.endpoint() + "/base?tenant=a"));
+        require(queried.ok, "an endpoint with a query resolves: " + queried.error);
+        require(fake.target() == "/base/v1/chat/completions?tenant=a",
+                "the query follows the completions route: " + fake.target());
+
+        // Unreachable endpoints name the origin only: a token in the path
+        // or the query never reaches the error text.
+        vlm::VlmResult unreachable =
+            vlm::generate(call_to("http://127.0.0.1:1/tenant/PATH-TOKEN?key=QUERY-TOKEN"));
+        require(!unreachable.ok, "nothing listens on port 1");
+        require(!unreachable.error.contains("PATH-TOKEN") &&
+                    !unreachable.error.contains("QUERY-TOKEN"),
+                "the unreachable error is redacted: " + unreachable.error);
         fake.attempts = 0;
 
         // Generation facts: the answering model, the stop reason verbatim,
@@ -159,6 +396,13 @@ int main() {
                 "endpoint origin drops the path");
         require(vlm::endpoint_origin("http://vlm:8080") == "http://vlm:8080",
                 "a bare origin is unchanged");
+        require(vlm::endpoint_origin("http://vlm:8080?key=secret") == "http://vlm:8080",
+                "endpoint origin drops a query that follows the authority directly");
+        require(vlm::endpoint_origin("http://vlm:8080/v1#frag") == "http://vlm:8080",
+                "endpoint origin drops the fragment");
+        // An endpoint that does not parse is never shown as typed.
+        require(vlm::endpoint_origin("http://alice:hunter2@vlm:8080") == "<invalid endpoint>",
+                "a rejected endpoint is shown as a placeholder, not echoed");
         fake.attempts = 0;
 
         // Alternates: the parameter is omitted unless asked for, and what
@@ -189,6 +433,19 @@ int main() {
                 "an alternate sent without a score claims none");
         require(alternates.has_logprobs && alternates.scored_tokens == 2,
                 "the chosen tokens still drive the page score");
+        fake.attempts = 0;
+
+        // logprobs is asked for by default; an operator can leave it off
+        // for endpoints that reject it, except where alternates need it.
+        require(vlm::generate(call_to(fake.endpoint())).ok && fake.asked_logprobs == 1,
+                "logprobs is on by default");
+        vlm::VlmCall quiet = call_to(fake.endpoint());
+        quiet.logprobs = false;
+        require(vlm::generate(quiet).ok && fake.asked_logprobs == -1,
+                "logprobs off omits the parameter");
+        quiet.top_logprobs = 2;
+        require(vlm::generate(quiet).ok && fake.asked_logprobs == 1,
+                "alternates bring logprobs back");
         fake.attempts = 0;
 
         // Transient failure: 503 once, then 200 — the page succeeds.
@@ -241,6 +498,8 @@ int main() {
         require(!failed.ok, "connection refused fails");
         require(failed.error.contains("unreachable"),
                 "connection failure surfaces as unreachable");
+
+        verify_budget_and_cancellation(fake);
     } catch (const std::exception& error) {
         std::println(stderr, "{}", error.what());
         fake.stop();

@@ -68,11 +68,14 @@ int main() {
         }
 
         // The HTTP/JSON front end shares the service instance (and its
-        // metrics) with gRPC; GRPC_VLM_HTTP_PORT 0/empty leaves it off.
+        // metrics) with gRPC; GRPC_VLM_HTTP_PORT 0/empty leaves it off. It
+        // binds GRPC_VLM_HTTP_HOST, loopback unless the operator says
+        // otherwise (and then a token is required).
         vlm::HttpGateway http_gateway(config, service);
         if (config.http_port != 0 &&
-            !http_gateway.start("0.0.0.0", static_cast<int>(config.http_port))) {
-            std::println(stderr, "Unable to listen on 0.0.0.0:{} (HTTP)", config.http_port);
+            !http_gateway.start(config.http_host, static_cast<int>(config.http_port))) {
+            std::println(stderr, "Unable to listen on {}:{} (HTTP)", config.http_host,
+                         config.http_port);
             return 1;
         }
 
@@ -103,12 +106,7 @@ int main() {
             });
         }
 
-        std::println("grpc-vlm-convert listening on {}{} (endpoint {})", config.listen_address,
-                     config.http_port != 0
-                         ? " (HTTP on 0.0.0.0:" + std::to_string(config.http_port) + ")"
-                         : "",
-                     config.endpoint.empty() ? "<none — per-request override required>"
-                                             : config.endpoint);
+        std::println("{}", vlm::startup_banner(config));
         server->Wait();
 
         http_gateway.stop();

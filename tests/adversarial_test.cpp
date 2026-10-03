@@ -332,6 +332,183 @@ void verify_otsl_adversarial() {
 }
 
 // ---------------------------------------------------------------------------
+// Table amplification: a model stuck repeating itself.
+// ---------------------------------------------------------------------------
+
+// The repetition-loop shape: one 4000-cell row, then 4000 one-cell rows.
+// Uncapped, every mapper builds a 4001 × 4000 grid: sixteen million
+// TableCells, gigabytes, for one page.
+std::string otsl_repetition_loop() {
+    std::string otsl;
+    for (int i = 0; i < 4000; i++) {
+        otsl += "<fcel>x";
+    }
+    otsl += "<nl>";
+    for (int i = 0; i < 4000; i++) {
+        otsl += "<fcel>y<nl>";
+    }
+    return otsl;
+}
+
+// Within the caps, rectangular, and named in exactly one warning.
+void require_capped(const docv1::TableData& data, const std::vector<vlmv1::PageWarning>& warnings,
+                    const std::string& ref, const std::string& what,
+                    const std::string& source_shape = "4001 rows by 4000 columns") {
+    require(data.num_cols() >= 1 && data.num_cols() <= 250, what + ": columns capped");
+    require(data.num_rows() >= 1 && data.num_rows() <= 2000, what + ": rows capped");
+    require(static_cast<size_t>(data.num_rows()) * static_cast<size_t>(data.num_cols()) <= 50000,
+            what + ": cells capped");
+    require(data.table_cells_size() <= 50000, what + ": table_cells capped");
+    require(data.grid_size() == data.num_rows(), what + ": grid has num_rows rows");
+    for (const docv1::TableRow& row : data.grid()) {
+        require(row.cells_size() == data.num_cols(), what + ": grid stays rectangular");
+    }
+    require(warnings.size() == 1, what + ": one warning, got " + std::to_string(warnings.size()));
+    require(warnings[0].code() == vlmv1::PAGE_WARNING_CODE_TABLE_TRUNCATED,
+            what + ": the warning says the table was truncated");
+    require(warnings[0].ref() == ref, what + ": the warning points at " + ref + ", not " +
+                                          warnings[0].ref());
+    require(warnings[0].message().contains(source_shape),
+            what + ": the warning names the source shape: " + warnings[0].message());
+}
+
+void verify_table_repetition_caps() {
+    const auto started = std::chrono::steady_clock::now();
+    {
+        docv1::Document doc;
+        std::string error;
+        std::vector<vlmv1::PageWarning> warnings;
+        require(vlm::mapping::map_otsl("<otsl>" + otsl_repetition_loop() + "</otsl>",
+                                       page_context(), &doc, &error, &warnings),
+                "OTSL loop maps: " + error);
+        require_capped(doc.tables(0).data(), warnings, "#/tables/0", "OTSL format");
+    }
+    {
+        docv1::Document doc;
+        std::string error;
+        std::vector<vlmv1::PageWarning> warnings;
+        require(vlm::mapping::map_doctags("<doctag><text>before</text><otsl>" +
+                                              otsl_repetition_loop() + "</otsl></doctag>",
+                                          page_context(), &doc, &error, &warnings),
+                "DocTags table loop maps: " + error);
+        require_capped(doc.tables(0).data(), warnings, "#/tables/0", "DocTags table");
+    }
+    {
+        // A chart's data table is capped the same way, and the warning
+        // points at the picture that carries it.
+        docv1::Document doc;
+        std::string error;
+        std::vector<vlmv1::PageWarning> warnings;
+        require(vlm::mapping::map_doctags("<doctag><chart><loc_0><loc_0><loc_9><loc_9>bar_chart"
+                                          "<otsl>" +
+                                              otsl_repetition_loop() + "</otsl></chart></doctag>",
+                                          page_context(), &doc, &error, &warnings),
+                "DocTags chart loop maps: " + error);
+        require_capped(doc.pictures(0).meta().tabular_chart().chart_data(), warnings,
+                       "#/pictures/0", "chart data");
+    }
+    {
+        std::string markdown = "|";
+        for (int i = 0; i < 4000; i++) {
+            markdown += " x |";
+        }
+        markdown += "\n";
+        for (int i = 0; i < 4000; i++) {
+            markdown += "| y |\n";
+        }
+        docv1::Document doc;
+        std::string error;
+        std::vector<vlmv1::PageWarning> warnings;
+        require(vlm::mapping::map_markdown(markdown, page_context(), &doc, &error, &warnings),
+                "markdown loop maps: " + error);
+        require_capped(doc.tables(0).data(), warnings, "#/tables/0", "markdown table");
+    }
+    {
+        // HTML goes through the same fill as markdown; a row past the column
+        // cap is enough to show it.
+        std::string html = "<table><tr>";
+        for (int i = 0; i < 300; i++) {
+            html += "<td>x</td>";
+        }
+        html += "</tr><tr><td>y</td></tr></table>";
+        docv1::Document doc;
+        std::string error;
+        std::vector<vlmv1::PageWarning> warnings;
+        require(vlm::mapping::map_html(html, page_context(), &doc, &error, &warnings),
+                "HTML wide table maps: " + error);
+        require_capped(doc.tables(0).data(), warnings, "#/tables/0", "HTML table",
+                       "2 rows by 300 columns");
+    }
+    require(std::chrono::steady_clock::now() - started < std::chrono::seconds(20),
+            "capped tables map in bounded time");
+
+    // A table inside the caps carries no warning.
+    docv1::Document doc;
+    std::string error;
+    std::vector<vlmv1::PageWarning> warnings;
+    require(vlm::mapping::map_otsl("<fcel>a<fcel>b<nl><fcel>c<fcel>d<nl>", page_context(), &doc,
+                                   &error, &warnings),
+            "small table maps: " + error);
+    require(warnings.empty() && doc.tables(0).data().grid_size() == 2,
+            "a table within the caps is untouched");
+}
+
+// The grid copies each anchor onto every position its span covers: long
+// spanned text, or spans overlapping each other (malformed), multiply that
+// past what one table may cost. The cells stay and the grid is left empty.
+void verify_table_grid_budget() {
+    {
+        // One anchor carrying 40 KB of text spans a 200 × 200 grid: 1.6 GB of
+        // copies.
+        std::string otsl = "<fcel>" + std::string(40000, 'z');
+        for (int c = 1; c < 200; c++) {
+            otsl += "<lcel>";
+        }
+        otsl += "<nl>";
+        for (int r = 1; r < 200; r++) {
+            for (int c = 0; c < 200; c++) {
+                otsl += "<xcel>";
+            }
+            otsl += "<nl>";
+        }
+        docv1::Document doc;
+        std::string error;
+        std::vector<vlmv1::PageWarning> warnings;
+        require(vlm::mapping::map_otsl(otsl, page_context(), &doc, &error, &warnings),
+                "long spanned text maps: " + error);
+        const docv1::TableData& data = doc.tables(0).data();
+        require(data.table_cells_size() == 1 && data.table_cells(0).row_span() == 200 &&
+                    data.table_cells(0).col_span() == 200,
+                "the spanning cell is kept");
+        require(data.grid_size() == 0, "the grid is left empty");
+        require(warnings.size() == 1 &&
+                    warnings[0].code() == vlmv1::PAGE_WARNING_CODE_TABLE_GRID_OMITTED &&
+                    warnings[0].ref() == "#/tables/0",
+                "the omitted grid is named in a warning");
+    }
+    {
+        // Diagonal anchors whose spans all overlap: about N³/3 copies.
+        constexpr int kSide = 220;
+        std::string otsl;
+        for (int r = 0; r < kSide; r++) {
+            for (int c = 0; c < kSide; c++) {
+                otsl += c == r ? "<fcel>d" : "<xcel>";
+            }
+            otsl += "<nl>";
+        }
+        docv1::Document doc;
+        std::string error;
+        std::vector<vlmv1::PageWarning> warnings;
+        require(vlm::mapping::map_otsl(otsl, page_context(), &doc, &error, &warnings),
+                "overlapping spans map: " + error);
+        require(doc.tables(0).data().table_cells_size() == kSide, "every anchor is kept");
+        require(warnings.size() == 1 &&
+                    warnings[0].code() == vlmv1::PAGE_WARNING_CODE_TABLE_GRID_OMITTED,
+                "overlapping spans past the budget drop the grid");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Image-crop attacks (direct calls against crafted rasters and boxes).
 // ---------------------------------------------------------------------------
 
@@ -379,6 +556,171 @@ void verify_image_crop_adversarial() {
     const std::string truncated = base64_decode(kGray4x3).substr(0, 20);
     require(!vlm::mapping::crop_png_image(truncated, 0, 0, 2, 2, 4, 3, &image),
             "truncated PNG yields no image");
+}
+
+// A PNG that is only a header claiming width × height RGBA pixels: a few
+// dozen bytes that would decode to width × height × 4. stb does not check
+// chunk CRCs, so they are zero.
+std::string png_header_claiming(uint32_t width, uint32_t height) {
+    std::string png("\x89PNG\r\n\x1a\n", 8);
+    auto be32 = [&png](uint32_t value) {
+        for (int shift = 24; shift >= 0; shift -= 8) {
+            png += static_cast<char>((value >> shift) & 0xFF);
+        }
+    };
+    be32(13);
+    png += "IHDR";
+    be32(width);
+    be32(height);
+    png += std::string("\x08\x06\x00\x00\x00", 5);  // 8-bit RGBA, no interlace
+    be32(0);
+    be32(0);
+    png += "IEND";
+    be32(0);
+    return png;
+}
+
+// The page raster is decoded once however many pictures a page names, and
+// crops past the page's budget are refused rather than multiplying the page
+// into its fragment.
+void verify_picture_crop_budget() {
+    const std::string gray = base64_decode(kGray4x3);
+    docv1::ImageRef image;
+    {
+        vlm::mapping::PageRaster raster(gray, 4, 3);
+        require(raster.decodes() == 0, "nothing is decoded before a crop is asked for");
+        for (int i = 0; i < 2; i++) {
+            require(raster.crop(0, 0, 4, 3, &image) == vlm::mapping::PageRaster::Crop::kAttached,
+                    "a full-page crop within the area budget attaches");
+        }
+        require(raster.crop(0, 0, 4, 3, &image) == vlm::mapping::PageRaster::Crop::kOverBudget,
+                "a third full-page crop is past twice the page's pixels");
+        require(raster.decodes() == 1, "three crops, one decode");
+    }
+    {
+        vlm::mapping::PageRaster raster(gray, 4, 3, {.max_crops = 2, .max_area_pages = 100});
+        raster.crop(0, 0, 1, 1, &image);
+        raster.crop(1, 1, 2, 2, &image);
+        require(raster.crop(2, 2, 3, 3, &image) == vlm::mapping::PageRaster::Crop::kOverBudget,
+                "crops past the per-page count are refused");
+    }
+
+    // A model repeating one full-page picture: every PictureItem is kept,
+    // only the budget's worth carry an image, and one warning says so.
+    vlm::mapping::PageContext page = page_context();
+    page.width = 4;
+    page.height = 3;
+    page.png = gray;
+    std::string text = "<doctag>";
+    for (int i = 0; i < 300; i++) {
+        text += "<picture><loc_0><loc_0><loc_500><loc_500></picture>";
+    }
+    text += "</doctag>";
+    docv1::Document doc;
+    std::string error;
+    std::vector<vlmv1::PageWarning> warnings;
+    require(vlm::mapping::map_doctags(text, page, &doc, &error, &warnings),
+            "repeated pictures map: " + error);
+    require(doc.pictures_size() == 300, "every picture is kept");
+    int with_image = 0;
+    for (const docv1::PictureItem& picture : doc.pictures()) {
+        with_image += picture.has_image() ? 1 : 0;
+    }
+    require(with_image == 2, "only the budget's worth carry an image: " +
+                                 std::to_string(with_image));
+    require(warnings.size() == 1 &&
+                warnings[0].code() == vlmv1::PAGE_WARNING_CODE_PICTURE_IMAGES_SKIPPED &&
+                warnings[0].message().contains("298") && warnings[0].ref().empty(),
+            "one page-wide warning counts the skipped images");
+}
+
+// The data URIs a page carries are capped in bytes, so a page of large
+// crops cannot outgrow a client's message limit: the crop that would cross
+// the cap is dropped, and so is every later one, however small.
+void verify_picture_inline_byte_cap() {
+    const std::string gray = base64_decode(kGray4x3);
+    docv1::ImageRef image;
+    require(vlm::mapping::crop_png_image(gray, 0, 0, 4, 3, 4, 3, &image),
+            "the full-page crop attaches under the default cap");
+    const size_t full_page = image.uri().size();
+    const size_t cap = full_page + full_page / 2;  // one full-page crop fits, two do not
+    {
+        vlm::mapping::PageRaster raster(gray, 4, 3, {.max_inline_bytes = cap});
+        require(raster.crop(0, 0, 4, 3, &image) == vlm::mapping::PageRaster::Crop::kAttached,
+                "a crop within the byte cap attaches");
+        image.Clear();
+        require(raster.crop(0, 0, 4, 3, &image) ==
+                    vlm::mapping::PageRaster::Crop::kOverByteCap,
+                "a crop that would cross the byte cap is refused");
+        require(!image.has_size() && image.uri().empty(), "a refused crop leaves image untouched");
+        require(raster.crop(0, 0, 1, 1, &image) ==
+                    vlm::mapping::PageRaster::Crop::kOverByteCap,
+                "every later crop is refused too, however small");
+        require(raster.inline_bytes() == full_page, "only the attached crop is counted");
+    }
+    {
+        vlm::mapping::PageRaster raster(gray, 4, 3, {.max_inline_bytes = full_page});
+        require(raster.crop(0, 0, 4, 3, &image) == vlm::mapping::PageRaster::Crop::kAttached,
+                "a crop exactly at the byte cap attaches");
+    }
+
+    // Through the mapper: the cap comes from the page context, every
+    // PictureItem is kept, and one warning names the byte cap.
+    vlm::mapping::PageContext page = page_context();
+    page.width = 4;
+    page.height = 3;
+    page.png = gray;
+    page.crops.max_inline_bytes = cap;
+    const std::string picture = "<picture><loc_0><loc_0><loc_500><loc_500></picture>";
+    docv1::Document doc;
+    std::string error;
+    std::vector<vlmv1::PageWarning> warnings;
+    require(vlm::mapping::map_doctags("<doctag>" + picture + picture + picture + "</doctag>",
+                                      page, &doc, &error, &warnings),
+            "pictures past the byte cap map: " + error);
+    require(doc.pictures_size() == 3, "every picture is kept");
+    require(doc.pictures(0).has_image() && !doc.pictures(1).has_image() &&
+                !doc.pictures(2).has_image(),
+            "only the first picture fits the byte cap");
+    require(warnings.size() == 1 &&
+                warnings[0].code() == vlmv1::PAGE_WARNING_CODE_PICTURE_IMAGES_SKIPPED &&
+                warnings[0].message().starts_with("2 picture(s)") &&
+                warnings[0].message().contains(std::to_string(cap) + " bytes") &&
+                warnings[0].ref().empty(),
+            "one page-wide warning names the byte cap: " +
+                (warnings.empty() ? std::string() : warnings[0].message()));
+}
+
+// A raster whose header claims more pixels than the decode cap is never
+// decoded: the picture is kept without an image and the page says why.
+void verify_raster_pixel_cap() {
+    const std::string huge = png_header_claiming(10000, 10000);
+    docv1::ImageRef image;
+    vlm::mapping::PageRaster raster(huge, 10000, 10000);
+    require(raster.crop(0, 0, 100, 100, &image) ==
+                vlm::mapping::PageRaster::Crop::kRasterTooLarge,
+            "a 100-megapixel header is refused");
+    require(raster.decodes() == 0, "the oversized raster is never decoded");
+    require(!vlm::mapping::crop_png_image(huge, 0, 0, 100, 100, 10000, 10000, &image),
+            "the one-shot crop refuses it too");
+
+    vlm::mapping::PageContext page = page_context();
+    page.width = 10000;
+    page.height = 10000;
+    page.png = huge;
+    docv1::Document doc;
+    std::string error;
+    std::vector<vlmv1::PageWarning> warnings;
+    require(vlm::mapping::map_doctags("<doctag><picture><loc_0><loc_0><loc_9><loc_9></picture>"
+                                      "</doctag>",
+                                      page, &doc, &error, &warnings),
+            "a picture on an oversized raster maps: " + error);
+    require(doc.pictures_size() == 1 && !doc.pictures(0).has_image(),
+            "the picture is kept, without an image");
+    require(warnings.size() == 1 &&
+                warnings[0].code() == vlmv1::PAGE_WARNING_CODE_PICTURE_IMAGES_SKIPPED &&
+                warnings[0].message().contains("10000x10000"),
+            "the warning names the raster size");
 }
 
 // ---------------------------------------------------------------------------
@@ -549,6 +891,59 @@ void verify_html_adversarial() {
             "cell whitespace collapses: " + doc.tables(0).data().grid(0).cells(0).text());
 }
 
+// Large blocks: the regex-based mapper recursed once per character of a
+// block and a single block of about 60 KB overflowed the stack, killing the
+// process. Run on a worker-sized thread, as the service does.
+void verify_html_large_blocks() {
+    std::string failure;
+    std::thread worker([&] {
+        try {
+            // The repetition-loop table (about 116 KB), now also capped.
+            std::string html = "<table><tr>";
+            for (int i = 0; i < 4000; i++) {
+                html += "<td>x</td>";
+            }
+            html += "</tr>";
+            for (int i = 0; i < 4000; i++) {
+                html += "<tr><td>y</td></tr>";
+            }
+            html += "</table>";
+            docv1::Document doc;
+            std::string error;
+            std::vector<vlmv1::PageWarning> warnings;
+            require(vlm::mapping::map_html(html, page_context(), &doc, &error, &warnings),
+                    "a 116 KB table maps: " + error);
+            require_capped(doc.tables(0).data(), warnings, "#/tables/0", "large HTML table");
+
+            // One 240 KB paragraph, with a <br> run and whitespace to fold.
+            doc.Clear();
+            const std::string words(240000, 'w');
+            require(vlm::mapping::map_html("<p>" + words + "<br   />" + std::string(5000, ' ') +
+                                               "end</p>",
+                                           page_context(), &doc, &error),
+                    "a 240 KB paragraph maps: " + error);
+            require(doc.texts(0).text().base().text() == words + " end",
+                    "the paragraph's text survives whole");
+
+            // Thousands of tags that never close: linear, and nothing maps.
+            std::string unclosed;
+            for (int i = 0; i < 30000; i++) {
+                unclosed += "<p>x";
+            }
+            doc.Clear();
+            const auto started = std::chrono::steady_clock::now();
+            require(!vlm::mapping::map_html(unclosed, page_context(), &doc, &error),
+                    "unclosed blocks still fail mapping");
+            require(std::chrono::steady_clock::now() - started < std::chrono::seconds(5),
+                    "a page of unclosed tags maps in linear time");
+        } catch (const std::exception& error) {
+            failure = error.what();
+        }
+    });
+    worker.join();
+    require(failure.empty(), failure);
+}
+
 // ---------------------------------------------------------------------------
 // VLM client attacks: hostile endpoint responses and endpoint URLs.
 // ---------------------------------------------------------------------------
@@ -632,6 +1027,15 @@ void verify_client_adversarial(ScriptVlm* fake) {
     require(!vlm::generate(call_to(fake->endpoint())).ok, "array content fails");
     fake->script = {{200, "{\"error\":{\"message\":\"boom\"}}"}};
     require(!vlm::generate(call_to(fake->endpoint())).ok, "200 with an error body fails");
+
+    // Valid JSON that is not an object: a keyed lookup on any of these
+    // throws, and a throw out of a worker thread ends the whole process.
+    for (const char* body : {"[1,2,3]", "\"just a string\"", "42", "null", "true"}) {
+        fake->script = {{200, body}};
+        const vlm::VlmResult not_object = vlm::generate(call_to(fake->endpoint()));
+        require(!not_object.ok && !not_object.error.empty(),
+                std::string("non-object JSON fails the page cleanly: ") + body);
+    }
 
     // A garbage Retry-After does not break the retry policy.
     fake->attempts = 0;
@@ -862,6 +1266,14 @@ void verify_service_adversarial(FakeVlm* fake) {
     require(out.status.ok() && out.documents == 5 && out.complete.pages_ok() == 5,
             "concurrency 1 converts every page");
 
+    // A page_no past int32 would come out negative in provenance and in
+    // the Document's pages map: rejected up front.
+    out = convert(server.channel, options, {page(2147483648U, "BIGPAGE")});
+    require(out.status.error_code() == grpc::StatusCode::INVALID_ARGUMENT,
+            "page_no above 2^31-1 is INVALID_ARGUMENT");
+    out = convert(server.channel, options, {page(2147483647U, "MAXPAGE")});
+    require(out.status.ok() && out.documents == 1, "page_no 2^31-1 itself converts");
+
     // Duplicate page numbers pass through (the stream is a page sequence,
     // not a set) — both events arrive.
     out = convert(server.channel, options, {page(1, "P1"), page(1, "P1B")});
@@ -945,9 +1357,15 @@ int main() {
     run("doctags_huge_loc_crop", verify_doctags_huge_loc_crop);
     run("doctags_text_edge_cases", verify_doctags_text_edge_cases);
     run("otsl_adversarial", verify_otsl_adversarial);
+    run("table_repetition_caps", verify_table_repetition_caps);
+    run("table_grid_budget", verify_table_grid_budget);
     run("image_crop_adversarial", verify_image_crop_adversarial);
+    run("picture_crop_budget", verify_picture_crop_budget);
+    run("picture_inline_byte_cap", verify_picture_inline_byte_cap);
+    run("raster_pixel_cap", verify_raster_pixel_cap);
     run("markdown_adversarial", verify_markdown_adversarial);
     run("html_adversarial", verify_html_adversarial);
+    run("html_large_blocks", verify_html_large_blocks);
     run("client_adversarial", [&] { verify_client_adversarial(&script_vlm); });
     run("presets_adversarial", verify_presets_adversarial);
     run("service_adversarial", [&] { verify_service_adversarial(&fake); });
