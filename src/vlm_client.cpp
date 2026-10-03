@@ -155,7 +155,7 @@ class CallGuard {
     std::thread thread_;
 };
 
-std::string base64_encode(const std::string& bytes) {
+std::string base64_encode(std::string_view bytes) {
     static const char kAlphabet[] =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     std::string out;

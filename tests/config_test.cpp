@@ -17,7 +17,8 @@ constexpr const char* kAllVars[] = {
     "GRPC_VLM_MAX_PAGE_BYTES",       "GRPC_VLM_MAX_PAGES",
     "GRPC_VLM_VLM_TIMEOUT_SECONDS",  "GRPC_VLM_METRICS_INTERVAL_SECONDS",
     "GRPC_VLM_HTTP_PORT",            "GRPC_VLM_API_KEY",
-    "GRPC_VLM_ALLOW_ENDPOINT_OVERRIDE",
+    "GRPC_VLM_ALLOW_ENDPOINT_OVERRIDE", "GRPC_VLM_MAX_INFLIGHT",
+    "GRPC_VLM_MAX_STREAM_BUFFERED_BYTES", "GRPC_VLM_MAX_BUFFERED_BYTES",
 };
 
 void clear_env() {
@@ -54,6 +55,40 @@ void verify_defaults() {
     require(config.http_port == 50059, "default HTTP port");
     require(config.vlm_api_key.empty(), "no default API key");
     require(!config.allow_endpoint_override, "endpoint overrides are off by default");
+    require(config.max_inflight == 8, "default process-wide VLM calls in flight");
+    require(config.max_stream_buffered_bytes == 4 * config.max_page_bytes,
+            "default stream buffer is four pages at the cap");
+    require(config.max_buffered_bytes == 16 * config.max_page_bytes,
+            "default process buffer is sixteen pages at the cap");
+}
+
+// The buffer caps follow the page cap unless set, and may not go below it:
+// a page that fits no budget could never be admitted.
+void verify_buffer_caps() {
+    clear_env();
+    ::setenv("GRPC_VLM_MAX_PAGE_BYTES", "1048576", 1);
+    vlm::Config derived = vlm::load_config_from_env();
+    require(derived.max_stream_buffered_bytes == 4 * 1048576ULL,
+            "the stream buffer default follows the page cap");
+    require(derived.max_buffered_bytes == 16 * 1048576ULL,
+            "the process buffer default follows the page cap");
+
+    ::setenv("GRPC_VLM_MAX_STREAM_BUFFERED_BYTES", "2097152", 1);
+    ::setenv("GRPC_VLM_MAX_BUFFERED_BYTES", "1048576", 1);
+    ::setenv("GRPC_VLM_MAX_INFLIGHT", "3", 1);
+    const vlm::Config set = vlm::load_config_from_env();
+    require(set.max_stream_buffered_bytes == 2097152, "explicit stream buffer");
+    require(set.max_buffered_bytes == 1048576, "a buffer exactly at the page cap is legal");
+    require(set.max_inflight == 3, "explicit in-flight cap");
+    ::unsetenv("GRPC_VLM_MAX_STREAM_BUFFERED_BYTES");
+    ::unsetenv("GRPC_VLM_MAX_BUFFERED_BYTES");
+
+    require(rejects("GRPC_VLM_MAX_STREAM_BUFFERED_BYTES", "1048575"),
+            "a stream buffer below the page cap is rejected");
+    require(rejects("GRPC_VLM_MAX_BUFFERED_BYTES", "4096"),
+            "a process buffer below the page cap is rejected");
+    require(rejects("GRPC_VLM_MAX_INFLIGHT", "0"), "an in-flight cap of zero is rejected");
+    clear_env();
 }
 
 // The API key is read verbatim and never shown; the override opt-in takes
@@ -171,6 +206,7 @@ int main() {
         verify_range_validation();
         verify_endpoint_validation_and_banner();
         verify_credentials_and_override_flag();
+        verify_buffer_caps();
         verify_http_port_disable();
     } catch (const std::exception& error) {
         std::println(stderr, "{}", error.what());

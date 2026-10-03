@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "secret.h"
@@ -29,8 +30,10 @@ struct VlmCall {
     // OpenAI "top_logprobs": how many alternates per generated token the
     // endpoint should return. Zero omits the parameter and asks for none.
     int top_logprobs = 0;
-    // PNG-encoded page raster.
-    std::string png;
+    // PNG-encoded page raster, viewed rather than copied: the caller keeps
+    // the bytes alive for the call (the service's worker owns the one copy
+    // of each page).
+    std::string_view png;
     // Wall-clock budget for the whole call in seconds: every attempt and
     // every backoff sleep together, not each socket read.
     long timeout_seconds = 300;

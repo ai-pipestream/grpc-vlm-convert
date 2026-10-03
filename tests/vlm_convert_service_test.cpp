@@ -77,6 +77,9 @@ struct FakeVlm {
     std::atomic<int> holding{0};
     std::atomic<bool> hold_released{false};
     std::atomic<long> held_disconnects{0};
+    // Requests open right now, and the most that were ever open at once.
+    std::atomic<int> inflight{0};
+    std::atomic<int> max_inflight{0};
 
     nlohmann::json last_request() {
         std::lock_guard<std::mutex> lock(mutex);
@@ -92,6 +95,15 @@ struct FakeVlm {
         server.Post("/v1/chat/completions", [this](const httplib::Request& request,
                                                    httplib::Response& response) {
             calls++;
+            // Requests open at once, and the most ever seen.
+            const int open = ++inflight;
+            for (int seen = max_inflight.load();
+                 open > seen && !max_inflight.compare_exchange_weak(seen, open);) {
+            }
+            struct Closer {
+                std::atomic<int>& count;
+                ~Closer() { count--; }
+            } closer{inflight};
             nlohmann::json body = nlohmann::json::parse(request.body, nullptr, false);
             {
                 std::lock_guard<std::mutex> lock(mutex);
@@ -114,6 +126,9 @@ struct FakeVlm {
                     held_disconnects++;
                 }
                 holding--;
+            }
+            if (png.contains("SLOW")) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(150));
             }
             if (png.contains("FAIL")) {
                 response.status = 503;
@@ -293,6 +308,79 @@ struct TestServer {
     }
 
     void stop() { server->Shutdown(); }
+};
+
+// A stream driven the way a real client drives it: the upload runs on its
+// own thread (a server applying back-pressure blocks it) and the events are
+// collected on another, so a test can look at what has arrived while the
+// stream is still running. upload() may be called in steps.
+struct LiveStream {
+    std::unique_ptr<vlmv1::VlmConvertService::Stub> stub;
+    grpc::ClientContext context;
+    std::unique_ptr<grpc::ClientReaderWriter<vlmv1::ConvertPagesRequest,
+                                             vlmv1::ConvertPagesResponse>>
+        stream;
+    std::mutex mutex;
+    std::vector<uint32_t> started;
+    int documents = 0;
+    int raws = 0;
+    std::jthread uploader;
+    std::jthread reader;
+
+    LiveStream(const std::shared_ptr<grpc::Channel>& channel, const vlmv1::ConvertOptions& options)
+        : stub(vlmv1::VlmConvertService::NewStub(channel)) {
+        stream = stub->ConvertPages(&context);
+        vlmv1::ConvertPagesRequest request;
+        *request.mutable_options() = options;
+        stream->Write(request);
+        reader = std::jthread([this] {
+            vlmv1::ConvertPagesResponse event;
+            while (stream->Read(&event)) {
+                std::lock_guard<std::mutex> lock(mutex);
+                if (event.has_page_started()) {
+                    started.push_back(event.page_started().page_no());
+                } else if (event.has_page_document()) {
+                    documents++;
+                } else if (event.has_page_raw()) {
+                    raws++;
+                }
+            }
+        });
+    }
+
+    // Sends the pages on the uploader thread (after any earlier upload),
+    // then half-closes when `last` is set.
+    void upload(std::vector<vlmv1::PageImage> pages, bool last) {
+        if (uploader.joinable()) {
+            uploader.join();
+        }
+        uploader = std::jthread([this, pages = std::move(pages), last] {
+            vlmv1::ConvertPagesRequest request;
+            for (const vlmv1::PageImage& image : pages) {
+                request.Clear();
+                *request.mutable_page_image() = image;
+                if (!stream->Write(request)) {
+                    return;
+                }
+            }
+            if (last) {
+                stream->WritesDone();
+            }
+        });
+    }
+
+    size_t started_count() {
+        std::lock_guard<std::mutex> lock(mutex);
+        return started.size();
+    }
+
+    grpc::Status finish() {
+        if (uploader.joinable()) {
+            uploader.join();
+        }
+        reader.join();
+        return stream->Finish();
+    }
 };
 
 void verify_streaming_and_failure_isolation(const std::shared_ptr<grpc::Channel>& channel) {
@@ -631,6 +719,115 @@ void verify_cancel_reaches_inflight_call(FakeVlm* fake) {
     server.stop();
 }
 
+// Pages of one fixed size, so a byte budget translates into a page count.
+std::vector<vlmv1::PageImage> sized_pages(uint32_t first, uint32_t count,
+                                          const std::string& first_marker) {
+    std::vector<vlmv1::PageImage> pages;
+    for (uint32_t i = 0; i < count; i++) {
+        const uint32_t page_no = first + i;
+        std::string marker = i == 0 ? first_marker : "PAGE-";
+        marker += std::to_string(page_no % 10);
+        pages.push_back(page(page_no, marker));
+    }
+    return pages;
+}
+
+// One stream holds at most max_stream_buffered_bytes of pages read but not
+// yet answered. With a page parked in the model and room for two, the
+// server admits two and reads nothing more until the budget frees, however
+// much the client has sent; then every page still converts.
+void verify_stream_backpressure(FakeVlm* fake) {
+    const std::vector<vlmv1::PageImage> pages = sized_pages(1, 6, "HOLD-");
+    vlm::Config config;
+    config.endpoint = fake->endpoint();
+    config.concurrency = 1;
+    config.max_stream_buffered_bytes = 2 * pages[0].png().size();
+    TestServer server(config);
+    fake->hold_released = false;
+
+    LiveStream live(server.channel, vlmv1::ConvertOptions());
+    live.upload(pages, /*last=*/true);
+    const bool parked = wait_until([&] { return fake->holding.load() > 0; });
+    // Two fit; then give an unbounded reader room to run ahead.
+    wait_until([&] { return live.started_count() >= 2; });
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    const size_t started_while_parked = live.started_count();
+    fake->hold_released = true;
+    const grpc::Status status = live.finish();
+
+    require(parked, "page 1 reached the model");
+    require(started_while_parked == 2,
+            "the stream admits only what its budget holds while page 1 is parked: " +
+                std::to_string(started_while_parked) + " started");
+    require(status.ok() && live.documents == 6, "every page converts once the budget frees: " +
+                                                    status.error_message());
+    require(server.service->buffered_bytes().in_use() == 0,
+            "every page's bytes are back in the process budget");
+    server.stop();
+}
+
+// The process-wide budget holds across streams: with a parked stream
+// filling it, a second stream's first page waits, then converts.
+void verify_process_backpressure(FakeVlm* fake) {
+    const std::vector<vlmv1::PageImage> first = sized_pages(1, 3, "HOLD-");
+    const std::vector<vlmv1::PageImage> second = sized_pages(11, 2, "PAGE-");
+    vlm::Config config;
+    config.endpoint = fake->endpoint();
+    config.concurrency = 1;
+    config.max_buffered_bytes = 2 * first[0].png().size();
+    TestServer server(config);
+    fake->hold_released = false;
+
+    LiveStream a(server.channel, vlmv1::ConvertOptions());
+    a.upload(first, /*last=*/true);
+    const bool parked = wait_until([&] { return fake->holding.load() > 0; });
+    wait_until([&] { return a.started_count() >= 2; });
+    LiveStream b(server.channel, vlmv1::ConvertOptions());
+    b.upload(second, /*last=*/true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    const size_t a_started = a.started_count();
+    const size_t b_started = b.started_count();
+    fake->hold_released = true;
+    const grpc::Status a_status = a.finish();
+    const grpc::Status b_status = b.finish();
+
+    require(parked, "stream A's first page reached the model");
+    require(a_started == 2, "stream A fills the process budget: " + std::to_string(a_started));
+    require(b_started == 0, "stream B waits for the process budget: " +
+                                std::to_string(b_started));
+    require(a_status.ok() && a.documents == 3, "stream A converts: " + a_status.error_message());
+    require(b_status.ok() && b.documents == 2, "stream B converts: " + b_status.error_message());
+    require(server.service->buffered_bytes().in_use() == 0, "the process budget drains");
+    server.stop();
+}
+
+// GRPC_VLM_MAX_INFLIGHT bounds the calls every stream together has open on
+// the endpoint, whatever each stream's own concurrency.
+void verify_process_inflight_cap(FakeVlm* fake) {
+    vlm::Config config;
+    config.endpoint = fake->endpoint();
+    config.concurrency = 2;
+    config.max_inflight = 1;
+    TestServer server(config);
+    fake->max_inflight = 0;
+
+    vlmv1::ConvertOptions options;
+    options.set_concurrency(2);
+    LiveStream a(server.channel, options);
+    LiveStream b(server.channel, options);
+    a.upload({page(1, "SLOW-1"), page(2, "SLOW-2")}, /*last=*/true);
+    b.upload({page(1, "SLOW-3"), page(2, "SLOW-4")}, /*last=*/true);
+    const grpc::Status a_status = a.finish();
+    const grpc::Status b_status = b.finish();
+
+    require(a_status.ok() && a.documents == 2, "stream A converts: " + a_status.error_message());
+    require(b_status.ok() && b.documents == 2, "stream B converts: " + b_status.error_message());
+    require(fake->max_inflight.load() == 1, "never more than one call open on the endpoint: " +
+                                                std::to_string(fake->max_inflight.load()));
+    require(server.service->vlm_slots().in_use() == 0, "every slot is given back");
+    server.stop();
+}
+
 void verify_no_endpoint() {
     vlm::Config config;
     config.endpoint = "";
@@ -728,6 +925,9 @@ int main() {
         verify_error_matrix(server.channel);
         verify_api_key_and_overrides(&fake);
         verify_cancel_reaches_inflight_call(&fake);
+        verify_stream_backpressure(&fake);
+        verify_process_backpressure(&fake);
+        verify_process_inflight_cap(&fake);
         verify_no_endpoint();
         verify_page_byte_cap();
         verify_service_info(server.channel, fake.endpoint());

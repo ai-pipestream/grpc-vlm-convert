@@ -26,7 +26,9 @@ service VlmConvertService {
   // fallback, then half-closes. The server replies with PageStarted as
   // each page enters the model queue, PageDocument (or PageRaw when
   // mapping fails or the endpoint errors) in completion order, and a
-  // single ConvertComplete trailer.
+  // single ConvertComplete trailer. Pages are admitted as they fit the
+  // server's buffer budgets, so a client sending faster than the model
+  // answers is held back by flow control.
   //
   // Errors: no endpoint configured (and no per-request override) is
   // FAILED_PRECONDITION; an endpoint override the server does not allow
@@ -91,7 +93,8 @@ message ConvertOptions {
   string endpoint = 6;
 
   // Pages in flight against the VLM for this stream. Zero means the
-  // server default; values above the configured maximum are clamped.
+  // server default; values above the configured maximum are clamped. All
+  // streams together are also held to the server's own in-flight cap.
   uint32 concurrency = 7;
 
   // When true, a single page failure fails the whole stream. Default
@@ -178,7 +181,8 @@ message PdfChunk {
 message ConvertPagesResponse {
   // Exactly one event kind per message.
   oneof event {
-    // A page entered the model queue. Emitted as the page arrives, before
+    // A page entered the model queue: emitted when the server admits it
+    // (its bytes fit the stream's and the server's buffer budgets), before
     // its VLM call starts.
     PageStarted page_started = 1;
     // A converted page: a Document fragment carrying that page's items,

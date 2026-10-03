@@ -5,6 +5,7 @@
 
 #include "ai/pipestream/vlm/v1/vlm_convert.grpc.pb.h"
 #include "config.h"
+#include "service/budget.h"
 
 namespace vlm {
 
@@ -14,6 +15,12 @@ namespace vlm {
 // thread drains the event queue onto the wire. Events are emitted in
 // completion order — a page's PageDocument goes out the moment its VLM
 // call returns, never held for an earlier page.
+//
+// Memory and endpoint load are bounded per stream and process-wide: a page
+// is admitted only when its bytes fit both the stream's and the process's
+// buffer budget (until then the read loop stops reading, so gRPC flow
+// control pushes back on the client), and every VLM call takes one of the
+// process's in-flight slots.
 class VlmConvertServiceImpl final
     : public ai::pipestream::vlm::v1::VlmConvertService::Service {
   public:
@@ -51,8 +58,16 @@ class VlmConvertServiceImpl final
     std::atomic<long> pages_ok{0};
     std::atomic<long> pages_failed{0};
 
+    // Process-wide caps, shared by every stream on both transports: bytes
+    // of page images read but not yet answered, and VLM calls in flight.
+    // Exposed for tests and diagnostics.
+    const Budget& buffered_bytes() const { return buffered_bytes_; }
+    const Budget& vlm_slots() const { return vlm_slots_; }
+
   private:
     const Config& config_;
+    Budget buffered_bytes_;
+    Budget vlm_slots_;
 };
 
 }  // namespace vlm

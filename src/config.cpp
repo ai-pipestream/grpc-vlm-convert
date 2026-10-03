@@ -94,9 +94,19 @@ Config load_config_from_env() {
         configured_bool("GRPC_VLM_ALLOW_ENDPOINT_OVERRIDE", config.allow_endpoint_override);
     config.presets = configured_list("GRPC_VLM_PRESETS");
     config.concurrency = configured_size("GRPC_VLM_CONCURRENCY", config.concurrency, 1, 64);
+    config.max_inflight = configured_size("GRPC_VLM_MAX_INFLIGHT", config.max_inflight, 1, 4096);
     config.max_page_bytes = configured_size("GRPC_VLM_MAX_PAGE_BYTES", config.max_page_bytes,
                                             1024, 1024ULL * 1024 * 1024);
     config.max_pages = configured_size("GRPC_VLM_MAX_PAGES", config.max_pages, 1, 100000);
+    // The buffer caps default to a multiple of the page cap and may not go
+    // below it: a page that fits no budget could never be admitted.
+    constexpr size_t kMaxBufferedBytes = 1ULL << 40;
+    config.max_stream_buffered_bytes =
+        configured_size("GRPC_VLM_MAX_STREAM_BUFFERED_BYTES", 4 * config.max_page_bytes,
+                        config.max_page_bytes, kMaxBufferedBytes);
+    config.max_buffered_bytes =
+        configured_size("GRPC_VLM_MAX_BUFFERED_BYTES", 16 * config.max_page_bytes,
+                        config.max_page_bytes, kMaxBufferedBytes);
     config.vlm_timeout_seconds =
         configured_size("GRPC_VLM_VLM_TIMEOUT_SECONDS", config.vlm_timeout_seconds, 1, 86400);
     config.metrics_interval_seconds = configured_size(

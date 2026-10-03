@@ -34,8 +34,22 @@ struct Config {
     // Pages in flight against the VLM per stream (server default and
     // clamp for ConvertOptions.concurrency).
     size_t concurrency = 2;
+    // VLM calls in flight across every stream (GRPC_VLM_MAX_INFLIGHT). The
+    // endpoint's capacity is per process, not per stream: N streams at
+    // full concurrency would otherwise queue N × concurrency requests on
+    // it, each with its timeout running.
+    size_t max_inflight = 8;
     size_t max_page_bytes = 32ULL * 1024 * 1024;
     size_t max_pages = 512;
+    // Bytes of page images one stream may hold read but not yet answered,
+    // queued or in flight (GRPC_VLM_MAX_STREAM_BUFFERED_BYTES, default 4 ×
+    // max_page_bytes). A stream at the cap stops reading, so gRPC flow
+    // control pushes back on its client instead of the server buffering
+    // whatever it is sent.
+    size_t max_stream_buffered_bytes = 4 * (32ULL * 1024 * 1024);
+    // The same bound across every stream (GRPC_VLM_MAX_BUFFERED_BYTES,
+    // default 16 × max_page_bytes).
+    size_t max_buffered_bytes = 16 * (32ULL * 1024 * 1024);
     // Wall-clock budget for one page's VLM call, every attempt and retry
     // backoff included.
     size_t vlm_timeout_seconds = 300;

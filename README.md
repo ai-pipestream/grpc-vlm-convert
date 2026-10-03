@@ -55,9 +55,12 @@ Configuration is entirely `GRPC_VLM_*` environment variables:
 | `GRPC_VLM_API_KEY` | *(empty)* | Bearer key for the configured endpoint, sent as `Authorization: Bearer <key>`. Never logged, returned or echoed, and never sent to an endpoint a request named. It crosses the network in clear text over `http://`: keep the VLM on a trusted network or behind a TLS proxy |
 | `GRPC_VLM_ALLOW_ENDPOINT_OVERRIDE` | `false` | `true` lets `ConvertOptions.endpoint` point a stream at another endpoint. Off, a request naming any endpoint other than the configured one fails `PERMISSION_DENIED`: an override lets every caller make this server POST to any host it can reach and read the answer back |
 | `GRPC_VLM_PRESETS` | *(all built-ins)* | Comma list of preset names the endpoint claims to serve, reported by `GetServiceInfo`. Built-ins: `smoldocling`, `granite-docling`, `got-ocr-2`, `granite-vision`, `deepseek-ocr`, `nanonets-ocr2`, `glm-ocr`, `lighton-ocr`, `north-micro-vision` (see `serving/north-micro-vision/` for an open-source endpoint that serves the last one on NVIDIA, Intel XPU or CPU) |
-| `GRPC_VLM_CONCURRENCY` | `2` | Pages in flight against the VLM per stream |
+| `GRPC_VLM_CONCURRENCY` | `2` | Pages in flight against the VLM per stream (all streams together are capped by `GRPC_VLM_MAX_INFLIGHT`) |
+| `GRPC_VLM_MAX_INFLIGHT` | `8` | VLM calls in flight across every stream: the endpoint's capacity is per server, not per stream. A call past it waits here, its timeout not yet running |
 | `GRPC_VLM_MAX_PAGE_BYTES` | `33554432` | Per-page PNG cap (`RESOURCE_EXHAUSTED`) |
 | `GRPC_VLM_MAX_PAGES` | `512` | Per-stream page cap (`RESOURCE_EXHAUSTED`) |
+| `GRPC_VLM_MAX_STREAM_BUFFERED_BYTES` | 4 × `GRPC_VLM_MAX_PAGE_BYTES` | Bytes of page images one stream may hold read but not yet answered (queued or in flight). At the cap the server stops reading that stream, so gRPC flow control holds the client back. At least `GRPC_VLM_MAX_PAGE_BYTES` |
+| `GRPC_VLM_MAX_BUFFERED_BYTES` | 16 × `GRPC_VLM_MAX_PAGE_BYTES` | The same bound across every stream on both transports. At least `GRPC_VLM_MAX_PAGE_BYTES` |
 | `GRPC_VLM_VLM_TIMEOUT_SECONDS` | `300` | Wall-clock budget for one page's whole VLM call: every attempt and every retry backoff spend from it, and an endpoint that drips bytes cannot stretch it. A cancelled stream or an expired client deadline ends the call sooner, mid-attempt included |
 | `GRPC_VLM_METRICS_INTERVAL_SECONDS` | `60` | Stdout metrics line interval, 0 disables |
 | `GRPC_VLM_HTTP_PORT` | `50059` | HTTP/JSON front-end port; `0` or empty disables the listener |
