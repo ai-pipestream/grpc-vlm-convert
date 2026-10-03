@@ -112,6 +112,7 @@ Config load_config_from_env() {
     config.vlm_api_key = configured_secret("GRPC_VLM_API_KEY");
     config.allow_endpoint_override =
         configured_bool("GRPC_VLM_ALLOW_ENDPOINT_OVERRIDE", config.allow_endpoint_override);
+    config.request_logprobs = configured_bool("GRPC_VLM_LOGPROBS", config.request_logprobs);
     config.presets = configured_list("GRPC_VLM_PRESETS");
     config.concurrency = configured_size("GRPC_VLM_CONCURRENCY", config.concurrency, 1, 64);
     config.max_inflight = configured_size("GRPC_VLM_MAX_INFLIGHT", config.max_inflight, 1, 4096);

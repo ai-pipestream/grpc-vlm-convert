@@ -183,6 +183,13 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
                                 std::to_string(kMaxTopLogprobs) + ", got " +
                                 std::to_string(options.top_logprobs()));
     }
+    // Alternates ride on logprobs; an endpoint the operator keeps them off
+    // for would answer 400, so fail before a page is paid for.
+    if (options.top_logprobs() > 0 && !config_.request_logprobs) {
+        return client_error(grpc::StatusCode::FAILED_PRECONDITION,
+                            "top_logprobs needs logprobs, which this server does not request "
+                            "from its endpoint (GRPC_VLM_LOGPROBS=false)");
+    }
     const size_t concurrency =
         options.concurrency() == 0
             ? config_.concurrency
@@ -469,6 +476,7 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
                      .stop = stop,
                      .max_tokens = max_tokens,
                      .top_logprobs = static_cast<int>(options.top_logprobs()),
+                     .logprobs = config_.request_logprobs,
                      .png = {},
                      .timeout_seconds = static_cast<long>(config_.vlm_timeout_seconds),
                      // The operator's key goes to the operator's endpoint

@@ -226,7 +226,10 @@ Logprobs: if the VLM endpoint returns them, the mean token
 log-probability over the response rides the `CollectorSource` as
 `raw_score` with `raw_score_kind` `page_mean_token_logprob` and
 `raw_score_samples` set to the number of tokens the mean was taken
-over. Skip silently when absent.
+over. Skip silently when absent. Some OpenAI-compatible servers reject
+the `logprobs` parameter with a 400; `GRPC_VLM_LOGPROBS=false` leaves it
+off (and refuses `top_logprobs`, which needs it, with
+`FAILED_PRECONDITION`).
 
 It is deliberately not `confidence`. The mean is computed over the whole
 page, so stamping it as a per-item confidence reports a crisp heading

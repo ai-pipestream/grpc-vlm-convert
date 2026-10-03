@@ -331,8 +331,12 @@ VlmResult generate(const VlmCall& call) {
                   {"image_url",
                    {{"url", "data:image/png;base64," + base64_encode(call.png)}}}}}}}}},
             {"max_tokens", call.max_tokens},
-            {"logprobs", true},
         };
+        // Some OpenAI-compatible servers reject the parameter outright, so
+        // an operator can leave it off; alternates cannot do without it.
+        if (call.logprobs || call.top_logprobs > 0) {
+            body["logprobs"] = true;
+        }
         if (!call.stop.empty()) {
             body["stop"] = call.stop;
         }

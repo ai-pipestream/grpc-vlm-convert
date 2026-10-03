@@ -579,6 +579,28 @@ void verify_page_warnings(const std::shared_ptr<grpc::Channel>& channel) {
     }
 }
 
+// With logprobs off (an endpoint that rejects them), calls omit the
+// parameter, and a request for alternates, which need them, fails before a
+// page is paid for.
+void verify_logprobs_off(FakeVlm* fake) {
+    vlm::Config config;
+    config.endpoint = fake->endpoint();
+    config.request_logprobs = false;
+    TestServer server(config);
+    Collected out = convert(server.channel, vlmv1::ConvertOptions(), {page(1, "PAGE1")});
+    require(out.status.ok(), "a page converts without logprobs: " + out.status.error_message());
+    require(!fake->last_request().contains("logprobs"), "the parameter is omitted");
+
+    vlmv1::ConvertOptions nbest;
+    nbest.set_top_logprobs(2);
+    const long calls_before = fake->calls.load();
+    out = convert(server.channel, nbest, {page(1, "PAGE1")});
+    require(out.status.error_code() == grpc::StatusCode::FAILED_PRECONDITION,
+            "alternates without logprobs is FAILED_PRECONDITION");
+    require(fake->calls.load() == calls_before, "no page was paid for");
+    server.stop();
+}
+
 void verify_abort_on_error(const std::shared_ptr<grpc::Channel>& channel) {    vlmv1::ConvertOptions options;
     options.set_abort_on_error(true);
     Collected out = convert(channel, options, {page(1, "PAGE1"), page(2, "FAIL2")});
@@ -992,6 +1014,7 @@ int main() {
         verify_stop_and_max_tokens(server.channel, &fake);
         verify_alternatives(server.channel, &fake);
         verify_page_warnings(server.channel);
+        verify_logprobs_off(&fake);
         verify_abort_on_error(server.channel);
         verify_error_matrix(server.channel);
         verify_api_key_and_overrides(&fake);

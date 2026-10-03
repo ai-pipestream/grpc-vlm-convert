@@ -20,7 +20,7 @@ constexpr const char* kAllVars[] = {
     "GRPC_VLM_ALLOW_ENDPOINT_OVERRIDE", "GRPC_VLM_MAX_INFLIGHT",
     "GRPC_VLM_MAX_STREAM_BUFFERED_BYTES", "GRPC_VLM_MAX_BUFFERED_BYTES",
     "GRPC_VLM_HTTP_HOST",            "GRPC_VLM_HTTP_MAX_BODY_BYTES",
-    "GRPC_VLM_HTTP_TOKEN",
+    "GRPC_VLM_HTTP_TOKEN",           "GRPC_VLM_LOGPROBS",
 };
 
 void clear_env() {
@@ -65,6 +65,7 @@ void verify_defaults() {
     require(config.http_host == "127.0.0.1", "the HTTP front end binds loopback by default");
     require(config.http_max_body_bytes == 64ULL * 1024 * 1024, "default HTTP body cap");
     require(config.http_token.empty(), "no default HTTP token");
+    require(config.request_logprobs, "logprobs are requested by default");
 }
 
 // Off loopback the HTTP front end needs a token, or the process does not
@@ -142,6 +143,9 @@ void verify_credentials_and_override_flag() {
     ::setenv("GRPC_VLM_ALLOW_ENDPOINT_OVERRIDE", "0", 1);
     require(!vlm::load_config_from_env().allow_endpoint_override, "0 turns overrides off");
     require(rejects("GRPC_VLM_ALLOW_ENDPOINT_OVERRIDE", "yes"), "a typo is rejected");
+    ::setenv("GRPC_VLM_LOGPROBS", "false", 1);
+    require(!vlm::load_config_from_env().request_logprobs, "logprobs can be turned off");
+    require(rejects("GRPC_VLM_LOGPROBS", "off"), "a logprobs typo is rejected");
     clear_env();
 }
 

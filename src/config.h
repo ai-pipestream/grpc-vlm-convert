@@ -28,6 +28,10 @@ struct Config {
     // override lets any caller make this process POST page images to any
     // http host it can reach and read the answer back.
     bool allow_endpoint_override = false;
+    // Whether calls ask for "logprobs": true (GRPC_VLM_LOGPROBS), the page
+    // score. Some OpenAI-compatible servers reject the parameter with a
+    // 400; turn it off for them.
+    bool request_logprobs = true;
     // Preset names the configured endpoint claims to serve (comma list).
     // Empty means "every built-in preset" when an endpoint is set.
     std::vector<std::string> presets;

@@ -38,6 +38,8 @@ struct ScriptableVlm {
     // The top_logprobs value the last request asked for, -1 when the
     // request omitted the parameter.
     std::atomic<int> asked_top_logprobs{-1};
+    // The last request's "logprobs": 1 true, 0 false, -1 omitted.
+    std::atomic<int> asked_logprobs{-1};
     // The request target (path and query) of the last call, as it arrived.
     std::mutex target_mutex;
     std::string last_target;
@@ -65,6 +67,9 @@ struct ScriptableVlm {
             asked_top_logprobs = asked.is_object() && asked.contains("top_logprobs")
                                      ? asked["top_logprobs"].get<int>()
                                      : -1;
+            asked_logprobs = asked.is_object() && asked.contains("logprobs")
+                                 ? (asked["logprobs"].get<bool>() ? 1 : 0)
+                                 : -1;
             if (failures_before_success.load() > 0) {
                 failures_before_success--;
                 response.status = failure_status.load();
@@ -402,6 +407,19 @@ int main() {
                 "an alternate sent without a score claims none");
         require(alternates.has_logprobs && alternates.scored_tokens == 2,
                 "the chosen tokens still drive the page score");
+        fake.attempts = 0;
+
+        // logprobs is asked for by default; an operator can leave it off
+        // for endpoints that reject it, except where alternates need it.
+        require(vlm::generate(call_to(fake.endpoint())).ok && fake.asked_logprobs == 1,
+                "logprobs is on by default");
+        vlm::VlmCall quiet = call_to(fake.endpoint());
+        quiet.logprobs = false;
+        require(vlm::generate(quiet).ok && fake.asked_logprobs == -1,
+                "logprobs off omits the parameter");
+        quiet.top_logprobs = 2;
+        require(vlm::generate(quiet).ok && fake.asked_logprobs == 1,
+                "alternates bring logprobs back");
         fake.attempts = 0;
 
         // Transient failure: 503 once, then 200 — the page succeeds.

@@ -30,6 +30,10 @@ struct VlmCall {
     // OpenAI "top_logprobs": how many alternates per generated token the
     // endpoint should return. Zero omits the parameter and asks for none.
     int top_logprobs = 0;
+    // OpenAI "logprobs": true (the page score). False omits the parameter,
+    // for endpoints that reject it; top_logprobs > 0 sends it regardless,
+    // since alternates need it.
+    bool logprobs = true;
     // PNG-encoded page raster, viewed rather than copied: the caller keeps
     // the bytes alive for the call (the service's worker owns the one copy
     // of each page).
