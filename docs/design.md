@@ -326,9 +326,12 @@ stream stops admitting pages) is the follow-up once gRParse reads
 concurrently; done before that, it would deadlock gRParse, which writes
 every page before reading any response.
 
-Every VLM call also takes one of the server's `GRPC_VLM_MAX_INFLIGHT`
-slots, so many streams cannot pile requests onto an endpoint that
-serves one at a time.
+Every page also takes one of the server's `GRPC_VLM_MAX_INFLIGHT`
+slots for its VLM call and keeps it while the answer is mapped, so many
+streams cannot pile requests onto an endpoint that serves one at a time,
+nor decode more rasters at once than there are slots: a picture page
+decodes its whole raster to crop from it, up to 4 bytes per pixel (about
+160 MB at the raster pixel cap).
 
 A stream halts once nobody will receive its answers: the client
 cancelled or its deadline passed, the consumer stopped taking events, a

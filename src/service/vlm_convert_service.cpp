@@ -258,8 +258,7 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
     });
 
     // One page through the model and the mapper. False when the page
-    // emits nothing: the stream stopped while it waited for a VLM slot or
-    // while its call was in flight.
+    // emits nothing: the stream stopped while its call was in flight.
     auto convert_page = [&](PageJob& job, vlmv1::ConvertPagesResponse* event) {
         mapping::PageContext page;
         page.page_no = job.image.page_no();
@@ -274,17 +273,7 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
         page.source.set_version(GRPC_VLM_VERSION);
         job.call.png = page.png;
         job.call.cancelled = halted;
-        VlmResult result;
-        {
-            // Every call holds one of the process's in-flight slots, so
-            // all streams together never have more than
-            // GRPC_VLM_MAX_INFLIGHT requests open on the endpoint.
-            const Lease slot = vlm_slots_.acquire(1, halted);
-            if (!slot) {
-                return false;
-            }
-            result = generate(job.call);
-        }
+        const VlmResult result = generate(job.call);
         if (result.cancelled) {
             return false;  // cut short because nobody is waiting for it
         }
@@ -376,6 +365,18 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
                 if (halted()) {
                     continue;  // nobody wants this page any more
                 }
+                // Every page holds one of the process's in-flight slots
+                // from its VLM call until its event is queued, so all
+                // streams together never have more than
+                // GRPC_VLM_MAX_INFLIGHT requests open on the endpoint nor
+                // more than that many answers being mapped. Mapping is the
+                // expensive half for memory: a DocTags page with pictures
+                // decodes its whole raster (up to 4 bytes per pixel, about
+                // 160 MB at the raster pixel cap) to crop from it.
+                const Lease slot = vlm_slots_.acquire(1, halted);
+                if (!slot) {
+                    continue;  // the stream stopped while the page waited
+                }
                 vlmv1::ConvertPagesResponse event;
                 try {
                     if (!convert_page(job, &event)) {
@@ -396,6 +397,7 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
                 } else {
                     ok++;
                 }
+                pages_finished++;
                 events.push(std::move(event));
                 if (failed_page && options.abort_on_error()) {
                     // The stream fails ABORTED now whatever happens to the

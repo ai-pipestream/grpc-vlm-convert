@@ -19,8 +19,8 @@ namespace vlm {
 // Memory and endpoint load are bounded per stream and process-wide: a page
 // is admitted only when its bytes fit both the stream's and the process's
 // buffer budget (until then the read loop stops reading, so gRPC flow
-// control pushes back on the client), and every VLM call takes one of the
-// process's in-flight slots.
+// control pushes back on the client), and every page takes one of the
+// process's in-flight slots for its VLM call and the mapping of the answer.
 class VlmConvertServiceImpl final
     : public ai::pipestream::vlm::v1::VlmConvertService::Service {
   public:
@@ -57,6 +57,10 @@ class VlmConvertServiceImpl final
     std::atomic<long> failed{0};
     std::atomic<long> pages_ok{0};
     std::atomic<long> pages_failed{0};
+    // Pages whose VLM answer was handled (mapped, or failed), counted as
+    // each page finishes and before it gives back its in-flight slot,
+    // whatever becomes of its stream.
+    std::atomic<long> pages_finished{0};
 
     // Process-wide caps, shared by every stream on both transports: bytes
     // of page images read but not yet answered, and VLM calls in flight.
