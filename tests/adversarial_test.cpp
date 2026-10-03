@@ -558,6 +558,114 @@ void verify_image_crop_adversarial() {
             "truncated PNG yields no image");
 }
 
+// A PNG that is only a header claiming width × height RGBA pixels: a few
+// dozen bytes that would decode to width × height × 4. stb does not check
+// chunk CRCs, so they are zero.
+std::string png_header_claiming(uint32_t width, uint32_t height) {
+    std::string png("\x89PNG\r\n\x1a\n", 8);
+    auto be32 = [&png](uint32_t value) {
+        for (int shift = 24; shift >= 0; shift -= 8) {
+            png += static_cast<char>((value >> shift) & 0xFF);
+        }
+    };
+    be32(13);
+    png += "IHDR";
+    be32(width);
+    be32(height);
+    png += std::string("\x08\x06\x00\x00\x00", 5);  // 8-bit RGBA, no interlace
+    be32(0);
+    be32(0);
+    png += "IEND";
+    be32(0);
+    return png;
+}
+
+// The page raster is decoded once however many pictures a page names, and
+// crops past the page's budget are refused rather than multiplying the page
+// into its fragment.
+void verify_picture_crop_budget() {
+    const std::string gray = base64_decode(kGray4x3);
+    docv1::ImageRef image;
+    {
+        vlm::mapping::PageRaster raster(gray, 4, 3);
+        require(raster.decodes() == 0, "nothing is decoded before a crop is asked for");
+        for (int i = 0; i < 2; i++) {
+            require(raster.crop(0, 0, 4, 3, &image) == vlm::mapping::PageRaster::Crop::kAttached,
+                    "a full-page crop within the area budget attaches");
+        }
+        require(raster.crop(0, 0, 4, 3, &image) == vlm::mapping::PageRaster::Crop::kOverBudget,
+                "a third full-page crop is past twice the page's pixels");
+        require(raster.decodes() == 1, "three crops, one decode");
+    }
+    {
+        vlm::mapping::PageRaster raster(gray, 4, 3, {.max_crops = 2, .max_area_pages = 100});
+        raster.crop(0, 0, 1, 1, &image);
+        raster.crop(1, 1, 2, 2, &image);
+        require(raster.crop(2, 2, 3, 3, &image) == vlm::mapping::PageRaster::Crop::kOverBudget,
+                "crops past the per-page count are refused");
+    }
+
+    // A model repeating one full-page picture: every PictureItem is kept,
+    // only the budget's worth carry an image, and one warning says so.
+    vlm::mapping::PageContext page = page_context();
+    page.width = 4;
+    page.height = 3;
+    page.png = gray;
+    std::string text = "<doctag>";
+    for (int i = 0; i < 300; i++) {
+        text += "<picture><loc_0><loc_0><loc_500><loc_500></picture>";
+    }
+    text += "</doctag>";
+    docv1::Document doc;
+    std::string error;
+    std::vector<vlmv1::PageWarning> warnings;
+    require(vlm::mapping::map_doctags(text, page, &doc, &error, &warnings),
+            "repeated pictures map: " + error);
+    require(doc.pictures_size() == 300, "every picture is kept");
+    int with_image = 0;
+    for (const docv1::PictureItem& picture : doc.pictures()) {
+        with_image += picture.has_image() ? 1 : 0;
+    }
+    require(with_image == 2, "only the budget's worth carry an image: " +
+                                 std::to_string(with_image));
+    require(warnings.size() == 1 &&
+                warnings[0].code() == vlmv1::PAGE_WARNING_CODE_PICTURE_IMAGES_SKIPPED &&
+                warnings[0].message().contains("298") && warnings[0].ref().empty(),
+            "one page-wide warning counts the skipped images");
+}
+
+// A raster whose header claims more pixels than the decode cap is never
+// decoded: the picture is kept without an image and the page says why.
+void verify_raster_pixel_cap() {
+    const std::string huge = png_header_claiming(10000, 10000);
+    docv1::ImageRef image;
+    vlm::mapping::PageRaster raster(huge, 10000, 10000);
+    require(raster.crop(0, 0, 100, 100, &image) ==
+                vlm::mapping::PageRaster::Crop::kRasterTooLarge,
+            "a 100-megapixel header is refused");
+    require(raster.decodes() == 0, "the oversized raster is never decoded");
+    require(!vlm::mapping::crop_png_image(huge, 0, 0, 100, 100, 10000, 10000, &image),
+            "the one-shot crop refuses it too");
+
+    vlm::mapping::PageContext page = page_context();
+    page.width = 10000;
+    page.height = 10000;
+    page.png = huge;
+    docv1::Document doc;
+    std::string error;
+    std::vector<vlmv1::PageWarning> warnings;
+    require(vlm::mapping::map_doctags("<doctag><picture><loc_0><loc_0><loc_9><loc_9></picture>"
+                                      "</doctag>",
+                                      page, &doc, &error, &warnings),
+            "a picture on an oversized raster maps: " + error);
+    require(doc.pictures_size() == 1 && !doc.pictures(0).has_image(),
+            "the picture is kept, without an image");
+    require(warnings.size() == 1 &&
+                warnings[0].code() == vlmv1::PAGE_WARNING_CODE_PICTURE_IMAGES_SKIPPED &&
+                warnings[0].message().contains("10000x10000"),
+            "the warning names the raster size");
+}
+
 // ---------------------------------------------------------------------------
 // Markdown attacks.
 // ---------------------------------------------------------------------------
@@ -1195,6 +1303,8 @@ int main() {
     run("table_repetition_caps", verify_table_repetition_caps);
     run("table_grid_budget", verify_table_grid_budget);
     run("image_crop_adversarial", verify_image_crop_adversarial);
+    run("picture_crop_budget", verify_picture_crop_budget);
+    run("raster_pixel_cap", verify_raster_pixel_cap);
     run("markdown_adversarial", verify_markdown_adversarial);
     run("html_adversarial", verify_html_adversarial);
     run("html_large_blocks", verify_html_large_blocks);

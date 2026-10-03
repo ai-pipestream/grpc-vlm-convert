@@ -18,6 +18,17 @@ constexpr double kLocGrid = 500.0;
 // Attribution docling stamps on doctags-derived picture predictions.
 constexpr const char* kCreatedBy = "load_from_doctags";
 
+// What one page's mapping carries beside the Document: the raster picture
+// crops come out of (decoded once, on the first crop), where the
+// PageDocument's warnings go, and the crops a cap refused, reported once
+// per page rather than once per picture.
+struct PageState {
+    PageRaster raster;
+    std::vector<vlmv1::PageWarning>* warnings = nullptr;
+    size_t crops_over_budget = 0;
+    size_t crops_too_large = 0;
+};
+
 struct Element {
     std::string name;
     std::vector<long> locs;  // up to 4: x1, y1, x2, y2 on the grid
@@ -338,7 +349,7 @@ int emit_caption(const Element& element, const PageContext& page, docv1::Documen
 // embedded OTSL as tabular chart data. Each lands in meta and in the
 // annotations union.
 bool emit_picture(const Element& element, const PageContext& page, docv1::Document* doc,
-                  std::vector<BodyChild>* order, std::vector<vlmv1::PageWarning>* warnings) {
+                  std::vector<BodyChild>* order, PageState& state) {
     const docv1::BoundingBox box = locs_box(element.locs, page);
     const int caption_index = emit_caption(element, page, doc, order);
     docv1::PictureItem* picture = add_picture(doc, page, prov_with_charspan(page, box, 0, 0));
@@ -384,7 +395,7 @@ bool emit_picture(const Element& element, const PageContext& page, docv1::Docume
         TableCut cut;
         if (parse_otsl_grid(element.otsl, &chart_data, &cut)) {
             note_table_cut(cut, chart_data, "chart data", body_child_ref(BodyChild::PICTURE, index),
-                           warnings);
+                           state.warnings);
             const std::string title = classification.empty() ? "other" : classification;
             auto* meta_chart = picture->mutable_meta()->mutable_tabular_chart();
             meta_chart->set_title(title);
@@ -397,12 +408,22 @@ bool emit_picture(const Element& element, const PageContext& page, docv1::Docume
     }
 
     // The region crop: best-effort. A page that carries no raster (or one
-    // stb cannot decode) still gets the PictureItem, just without image.
+    // stb cannot decode) still gets the PictureItem, just without image;
+    // so does a picture a crop cap refused, counted for the page warning.
     if (!page.png.empty() && element.locs.size() >= 4) {
         docv1::ImageRef crop;
-        if (crop_png_image(page.png, box.l(), box.t(), box.r(), box.b(), page.width,
-                           page.height, &crop)) {
-            *picture->mutable_image() = std::move(crop);
+        switch (state.raster.crop(box.l(), box.t(), box.r(), box.b(), &crop)) {
+            case PageRaster::Crop::kAttached:
+                *picture->mutable_image() = std::move(crop);
+                break;
+            case PageRaster::Crop::kOverBudget:
+                state.crops_over_budget++;
+                break;
+            case PageRaster::Crop::kRasterTooLarge:
+                state.crops_too_large++;
+                break;
+            case PageRaster::Crop::kFailed:
+                break;
         }
     }
     return true;
@@ -414,7 +435,7 @@ bool emit_picture(const Element& element, const PageContext& page, docv1::Docume
 // element's own locations — docling's <inline> groups give every child
 // the chunk's shared box.
 bool emit_element(const Element& element, const PageContext& page, docv1::Document* doc,
-                  std::vector<BodyChild>* order, std::vector<vlmv1::PageWarning>* warnings,
+                  std::vector<BodyChild>* order, PageState& state,
                   const docv1::BoundingBox* forced_box = nullptr) {
     const std::string text = trim(element.text);
     const docv1::ProvenanceItem prov =
@@ -462,7 +483,7 @@ bool emit_element(const Element& element, const PageContext& page, docv1::Docume
         add_formula(doc, page, prov, text);
         index = doc->texts_size() - 1;
     } else if (tag == "picture" || tag == "chart") {
-        return emit_picture(element, page, doc, order, warnings);
+        return emit_picture(element, page, doc, order, state);
     } else if (tag == "table" || tag == "otsl") {
         const int caption_index = emit_caption(element, page, doc, order);
         const docv1::ProvenanceItem table_prov =
@@ -477,7 +498,8 @@ bool emit_element(const Element& element, const PageContext& page, docv1::Docume
             TableCut cut;
             parse_otsl_grid(body, table->mutable_data(), &cut);
             note_table_cut(cut, table->data(), "table",
-                           body_child_ref(BodyChild::TABLE, doc->tables_size() - 1), warnings);
+                           body_child_ref(BodyChild::TABLE, doc->tables_size() - 1),
+                           state.warnings);
         }
         return true;
     } else if (tag == "page_header" || tag == "page_footer") {
@@ -670,8 +692,7 @@ bool emit_list_group(const std::string& chunk, bool ordered, const PageContext& 
 // <inline>: an inline group whose children are the chunk's items, each
 // carrying the chunk's first (shared) box — docling's add_inline_group.
 bool emit_inline_group(const std::string& chunk, const PageContext& page,
-                       docv1::Document* doc, std::vector<BodyChild>* order,
-                       std::vector<vlmv1::PageWarning>* warnings) {
+                       docv1::Document* doc, std::vector<BodyChild>* order, PageState& state) {
     docv1::GroupItem* group = doc->add_groups();
     const std::string group_ref = body_child_ref(BodyChild::GROUP, doc->groups_size() - 1);
     group->set_name("group");  // docling's InlineGroup default name
@@ -726,7 +747,7 @@ bool emit_inline_group(const std::string& chunk, const PageContext& page,
         child.name = token;
         child.text = inner_text(child_chunk);
         std::vector<BodyChild> child_order;
-        if (!emit_element(child, page, doc, &child_order, warnings, &box)) {
+        if (!emit_element(child, page, doc, &child_order, state, &box)) {
             continue;
         }
         // The child is not a body child: parent it to the group instead.
@@ -759,6 +780,7 @@ bool map_doctags(const std::string& text, const PageContext& page, docv1::Docume
         return false;
     }
 
+    PageState state{PageRaster(page.png, page.width, page.height), warnings};
     size_t items = 0;
     Element current;
     bool element_open = false;
@@ -769,7 +791,7 @@ bool map_doctags(const std::string& text, const PageContext& page, docv1::Docume
     size_t pos = 0;
 
     auto flush = [&] {
-        if (element_open && emit_element(current, page, out, &order, warnings)) {
+        if (element_open && emit_element(current, page, out, &order, state)) {
             items++;
         }
         current = Element{};
@@ -873,7 +895,7 @@ bool map_doctags(const std::string& text, const PageContext& page, docv1::Docume
             if (token == "key_value_region") {
                 emitted = emit_key_value_region(chunk, page, out, &order);
             } else if (token == "inline") {
-                emitted = emit_inline_group(chunk, page, out, &order, warnings);
+                emitted = emit_inline_group(chunk, page, out, &order, state);
             } else {
                 emitted = emit_list_group(chunk, token == "ordered_list", page, out, &order);
             }
@@ -913,6 +935,25 @@ bool map_doctags(const std::string& text, const PageContext& page, docv1::Docume
     if (items == 0) {
         *error = "DocTags response produced no document items";
         return false;
+    }
+    if (state.crops_over_budget > 0) {
+        const CropBudget budget;
+        add_warning(warnings, vlmv1::PAGE_WARNING_CODE_PICTURE_IMAGES_SKIPPED,
+                    std::to_string(state.crops_over_budget) +
+                        " picture(s) carry no image: the page's crop budget (" +
+                        std::to_string(budget.max_crops) + " crops, " +
+                        std::to_string(static_cast<int>(budget.max_area_pages)) +
+                        "x the page's pixels) ran out",
+                    "");
+    }
+    if (state.crops_too_large > 0) {
+        add_warning(warnings, vlmv1::PAGE_WARNING_CODE_PICTURE_IMAGES_SKIPPED,
+                    std::to_string(state.crops_too_large) +
+                        " picture(s) carry no image: the page raster is " +
+                        std::to_string(state.raster.width()) + "x" +
+                        std::to_string(state.raster.height()) + ", above the " +
+                        std::to_string(kMaxRasterPixels) + "-pixel decode cap",
+                    "");
     }
     finalize_document(out, page, order);
     return true;

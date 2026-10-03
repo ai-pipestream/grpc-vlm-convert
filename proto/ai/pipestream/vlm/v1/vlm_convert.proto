@@ -246,6 +246,11 @@ enum PageWarningCode {
   // overlapping spans or long spanned text; the item keeps its cells and
   // an empty grid.
   PAGE_WARNING_CODE_TABLE_GRID_OMITTED = 2;
+  // Pictures carry no image because a crop cap refused them: the page's
+  // crop budget ran out (a model repeating a picture asks for many), or
+  // the page raster is larger than the server decodes. Every PictureItem
+  // is still there.
+  PAGE_WARNING_CODE_PICTURE_IMAGES_SKIPPED = 3;
 }
 
 // Unmapped model output or a page failure.

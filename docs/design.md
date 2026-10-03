@@ -214,7 +214,13 @@ children are the chunk's items, all stamped with the chunk's first
 
 Picture and chart regions are cropped from the page raster (stb) and
 attached as `ImageRef` PNG data URIs; a missing or undecodable raster
-still yields the PictureItem, just without an image.
+still yields the PictureItem, just without an image. The raster is
+decoded once per page, on the first crop, and never when its header
+claims more than 40 million pixels; a page spends at most 100 crops and
+twice its own pixels on them, so a model repeating `<picture>` cannot
+multiply the page into its fragment. A picture a cap refused keeps its
+PictureItem without an image, and the page carries one
+`PAGE_WARNING_CODE_PICTURE_IMAGES_SKIPPED` warning.
 
 Logprobs: if the VLM endpoint returns them, the mean token
 log-probability over the response rides the `CollectorSource` as
