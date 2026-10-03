@@ -87,11 +87,12 @@ message ConvertOptions {
 
   // Per-request endpoint override: an http:// base (/v1/chat/completions
   // is appended; after a /v1 base only /chat/completions) or a full
-  // .../chat/completions URL, used as is. Empty means the configured
-  // server endpoint. Any other value is refused with PERMISSION_DENIED
-  // unless the operator allows overrides, and an override never receives
-  // the server's API key. When both are empty the RPC fails with
-  // FAILED_PRECONDITION.
+  // .../chat/completions URL, used as is. Empty, or any spelling of the
+  // configured endpoint that reaches the same URL (host case, a default
+  // port, trailing slashes), means the configured server endpoint. Any
+  // other value is refused with PERMISSION_DENIED unless the operator
+  // allows overrides, and an override never receives the server's API
+  // key. When both are empty the RPC fails with FAILED_PRECONDITION.
   string endpoint = 6;
 
   // Pages in flight against the VLM for this stream. Zero means the

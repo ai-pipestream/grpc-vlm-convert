@@ -694,22 +694,33 @@ void verify_api_key_and_overrides(FakeVlm* fake) {
         require(fake->authorization() == "Bearer " + key,
                 "the configured endpoint gets the bearer key");
 
-        // Naming the configured endpoint is not an override.
-        options.set_endpoint(fake->endpoint());
-        out = convert(server.channel, options, {page(1, "PAGE1")});
-        require(out.status.ok(), "naming the configured endpoint is allowed: " +
-                                     out.status.error_message());
-        require(fake->authorization() == "Bearer " + key,
-                "the key still goes to the configured endpoint");
+        // Naming the configured endpoint is not an override, in any
+        // spelling that reaches the same URL.
+        for (const std::string& same :
+             {fake->endpoint(), fake->endpoint() + "/", fake->endpoint() + "/v1",
+              fake->endpoint() + "/v1/chat/completions"}) {
+            options.set_endpoint(same);
+            out = convert(server.channel, options, {page(1, "PAGE1")});
+            require(out.status.ok(), "naming the configured endpoint as " + same +
+                                         " is allowed: " + out.status.error_message());
+            require(fake->authorization() == "Bearer " + key,
+                    "the key still goes to the configured endpoint");
+        }
 
-        // Any other endpoint is an override, refused before a call is made.
+        // Any other endpoint is an override, refused before a call is made:
+        // another port, another host, the same server under another query.
         const long calls_before = fake->calls.load();
-        options.set_endpoint("http://127.0.0.1:1");
-        out = convert(server.channel, options, {page(1, "PAGE1")});
-        require(out.status.error_code() == grpc::StatusCode::PERMISSION_DENIED,
-                "an override without the opt-in is PERMISSION_DENIED");
-        require(out.status.error_message().contains("GRPC_VLM_ALLOW_ENDPOINT_OVERRIDE"),
-                "the refusal names the opt-in");
+        for (const std::string& other :
+             {std::string("http://127.0.0.1:1"),
+              "http://127.0.0.2:" + std::to_string(fake->port),
+              fake->endpoint() + "?tenant=b"}) {
+            options.set_endpoint(other);
+            out = convert(server.channel, options, {page(1, "PAGE1")});
+            require(out.status.error_code() == grpc::StatusCode::PERMISSION_DENIED,
+                    "an override without the opt-in is PERMISSION_DENIED: " + other);
+            require(out.status.error_message().contains("GRPC_VLM_ALLOW_ENDPOINT_OVERRIDE"),
+                    "the refusal names the opt-in");
+        }
         require(fake->calls.load() == calls_before, "a refused override reaches no endpoint");
 
         // GetServiceInfo never carries the key.
@@ -725,9 +736,10 @@ void verify_api_key_and_overrides(FakeVlm* fake) {
     config.allow_endpoint_override = true;
     {
         TestServer server(config);
-        // Same server, different spelling: an override, so no key.
+        // Same server, different URL (a query the fake ignores): an
+        // override, so no key.
         vlmv1::ConvertOptions options;
-        options.set_endpoint(fake->endpoint() + "/");
+        options.set_endpoint(fake->endpoint() + "?tenant=b");
         Collected out = convert(server.channel, options, {page(1, "PAGE1")});
         require(out.status.ok(), "an allowed override converts: " + out.status.error_message());
         require(fake->authorization().empty(), "an override never receives the operator's key");

@@ -139,12 +139,13 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
     }
     const vlmv1::ConvertOptions options = request.options();
 
-    // A request naming the configured endpoint is not an override. Any
-    // other endpoint is, and is refused unless the operator opted in: it
-    // would let every caller make this process POST page images to any
-    // http host it can reach and read the answer back (SSRF).
-    const bool endpoint_override =
-        !options.endpoint().empty() && options.endpoint() != config_.endpoint;
+    // A request naming the configured endpoint, in any spelling that
+    // reaches the same URL, is not an override. Any other endpoint is, and
+    // is refused unless the operator opted in: it would let every caller
+    // make this process POST page images to any http host it can reach
+    // and read the answer back (SSRF).
+    const bool endpoint_override = !options.endpoint().empty() &&
+                                   !same_endpoint(options.endpoint(), config_.endpoint);
     if (endpoint_override && !config_.allow_endpoint_override) {
         return client_error(grpc::StatusCode::PERMISSION_DENIED,
                             "per-request endpoint overrides are disabled on this server (the "

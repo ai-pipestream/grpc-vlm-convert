@@ -54,7 +54,11 @@ and `abort_on_error`.
 The `endpoint` override is refused with `PERMISSION_DENIED` unless the
 operator sets `GRPC_VLM_ALLOW_ENDPOINT_OVERRIDE=true`: it would let any
 caller point this server at any host it can reach (SSRF). Naming the
-configured endpoint itself is not an override. The operator's
+configured endpoint itself is not an override, in any spelling that
+reaches the same URL: the two are compared parsed, host case-blind, an
+absent port as 80, trailing slashes and the `/v1` or
+`/v1/chat/completions` suffix resolved the way calls resolve them. A
+different host, port, path prefix or query is an override. The operator's
 `GRPC_VLM_API_KEY` goes only to the configured endpoint, never to an
 override.
 

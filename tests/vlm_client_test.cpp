@@ -301,6 +301,32 @@ int main() {
                     "SECRET-TOKEN"),
                 "a rejection never quotes the endpoint");
 
+        // Endpoint identity is where a call lands, not how it is spelled:
+        // the service lets a request name the configured endpoint in any
+        // of these without it counting as an override.
+        for (const char* same : {"http://vlm:8080", "http://vlm:8080/", "http://VLM:8080",
+                                 "http://vlm:08080", "http://vlm:8080/v1", "http://vlm:8080/v1/",
+                                 "http://vlm:8080/v1/chat/completions",
+                                 "http://vlm:8080/v1/chat/completions/", "http://vlm:8080#frag"}) {
+            require(vlm::same_endpoint("http://vlm:8080", same),
+                    std::string("an equivalent spelling is the same endpoint: ") + same);
+        }
+        require(vlm::same_endpoint("http://vlm", "http://vlm:80"), "an absent port is 80");
+        require(vlm::same_endpoint("http://[::ABCD]:8080", "http://[::abcd]:8080/"),
+                "IPv6 hex digits compare case-blind");
+        require(vlm::same_endpoint("http://vlm:8080/base?t=a", "http://vlm:8080/base/?t=a"),
+                "a path prefix and query survive a trailing slash");
+        for (const char* other : {"http://vlm2:8080", "http://vlm:8081", "http://vlm",
+                                  "http://vlm:8080/base", "http://vlm:8080?tenant=b",
+                                  "http://vlm:8080/V1"}) {
+            require(!vlm::same_endpoint("http://vlm:8080", other),
+                    std::string("a different host, port, path or query is another endpoint: ") +
+                        other);
+        }
+        require(!vlm::same_endpoint("http://vlm:8080", "https://vlm:8080") &&
+                    !vlm::same_endpoint("not-a-url", "not-a-url"),
+                "an endpoint that does not parse matches nothing, itself included");
+
         // A bad port is an error result, not a crash (httplib leaves its
         // client null when the port does not parse).
         vlm::VlmResult bad_port = vlm::generate(call_to("http://127.0.0.1:99999"));

@@ -126,6 +126,15 @@ void set_retry_backoff_base_ms(long ms);
 // quotes the endpoint: deployments put tokens in it.
 std::string endpoint_error(const std::string& endpoint);
 
+// True when both endpoints parse and a call to either would reach the same
+// URL: same host (compared case-blind), same port (an absent one is 80),
+// and the same request target once the shapes VlmCall::endpoint lists
+// are resolved, so "http://vlm:8080", "http://VLM:8080/" and
+// "http://vlm:8080/v1/chat/completions" are one endpoint. A different
+// path prefix or query is a different endpoint. False when either does
+// not parse.
+bool same_endpoint(const std::string& left, const std::string& right);
+
 // The endpoint as it may be shown: scheme, host and port only. Userinfo,
 // path, query and fragment are dropped on purpose, because deployments put
 // tokens in all of them. Startup logs, GetServiceInfo, error text and the

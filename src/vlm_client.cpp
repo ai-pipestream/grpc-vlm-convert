@@ -183,6 +183,10 @@ struct ParsedEndpoint {
     std::string origin;
     // Path plus query, e.g. "/base/v1/chat/completions?tenant=a".
     std::string target;
+    // The host lowercased (names and IPv6 hex digits are case-blind) and
+    // the port with HTTP's default filled in: what same_endpoint compares.
+    std::string host;
+    uint16_t port = 80;
 };
 
 bool host_char(char c) {
@@ -248,6 +252,7 @@ std::string parse_endpoint(const std::string& endpoint, ParsedEndpoint* out) {
             return "endpoint needs a host of letters, digits, '.', '-' or '_'";
         }
     }
+    out->port = 80;
     if (has_port) {
         unsigned value = 0;
         const auto [end, failure] = std::from_chars(port.data(), port.data() + port.size(), value);
@@ -255,8 +260,13 @@ std::string parse_endpoint(const std::string& endpoint, ParsedEndpoint* out) {
             value < 1 || value > 65535) {
             return "endpoint port must be a number from 1 to 65535";
         }
+        out->port = static_cast<uint16_t>(value);
     }
     out->origin = "http://" + std::string(host) + (has_port ? ":" + std::string(port) : "");
+    out->host.clear();
+    for (const char c : host) {
+        out->host.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    }
 
     // Path and query; a fragment never leaves the client.
     std::string_view tail =
@@ -299,6 +309,14 @@ std::string endpoint_origin(const std::string& endpoint) {
         return "<invalid endpoint>";
     }
     return parsed.origin;
+}
+
+bool same_endpoint(const std::string& left, const std::string& right) {
+    ParsedEndpoint a, b;
+    if (!parse_endpoint(left, &a).empty() || !parse_endpoint(right, &b).empty()) {
+        return false;
+    }
+    return a.host == b.host && a.port == b.port && a.target == b.target;
 }
 
 VlmResult generate(const VlmCall& call) {
