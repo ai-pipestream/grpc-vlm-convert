@@ -95,7 +95,7 @@ std::vector<std::vector<std::string>> parse_table_rows(const std::string& table_
 }  // namespace
 
 bool map_html(const std::string& text, const PageContext& page, docv1::Document* out,
-              std::string* error) {
+              std::string* error, std::vector<vlmv1::PageWarning>* warnings) {
     // Block-level constructs only — this is a snippet mapper, not an HTML
     // parser; anything richer belongs to the HTML collector upstream.
     // [\s\S] rather than . so a block that spans lines still matches:
@@ -133,7 +133,9 @@ bool map_html(const std::string& text, const PageContext& page, docv1::Document*
             if (rows.empty() && !body.empty()) {
                 rows.push_back({body});
             }
-            fill_table_data(table->mutable_data(), rows, header_rows);
+            const TableCut cut = fill_table_data(table->mutable_data(), rows, header_rows);
+            note_table_cut(cut, table->data(), "table",
+                           body_child_ref(BodyChild::TABLE, out->tables_size() - 1), warnings);
         } else {
             add_text(out, page, docv1::DOC_ITEM_LABEL_PARAGRAPH, page_prov(page), body);
         }

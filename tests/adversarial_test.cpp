@@ -332,6 +332,183 @@ void verify_otsl_adversarial() {
 }
 
 // ---------------------------------------------------------------------------
+// Table amplification: a model stuck repeating itself.
+// ---------------------------------------------------------------------------
+
+// The repetition-loop shape: one 4000-cell row, then 4000 one-cell rows.
+// Uncapped, every mapper builds a 4001 × 4000 grid: sixteen million
+// TableCells, gigabytes, for one page.
+std::string otsl_repetition_loop() {
+    std::string otsl;
+    for (int i = 0; i < 4000; i++) {
+        otsl += "<fcel>x";
+    }
+    otsl += "<nl>";
+    for (int i = 0; i < 4000; i++) {
+        otsl += "<fcel>y<nl>";
+    }
+    return otsl;
+}
+
+// Within the caps, rectangular, and named in exactly one warning.
+void require_capped(const docv1::TableData& data, const std::vector<vlmv1::PageWarning>& warnings,
+                    const std::string& ref, const std::string& what,
+                    const std::string& source_shape = "4001 rows by 4000 columns") {
+    require(data.num_cols() >= 1 && data.num_cols() <= 250, what + ": columns capped");
+    require(data.num_rows() >= 1 && data.num_rows() <= 2000, what + ": rows capped");
+    require(static_cast<size_t>(data.num_rows()) * static_cast<size_t>(data.num_cols()) <= 50000,
+            what + ": cells capped");
+    require(data.table_cells_size() <= 50000, what + ": table_cells capped");
+    require(data.grid_size() == data.num_rows(), what + ": grid has num_rows rows");
+    for (const docv1::TableRow& row : data.grid()) {
+        require(row.cells_size() == data.num_cols(), what + ": grid stays rectangular");
+    }
+    require(warnings.size() == 1, what + ": one warning, got " + std::to_string(warnings.size()));
+    require(warnings[0].code() == vlmv1::PAGE_WARNING_CODE_TABLE_TRUNCATED,
+            what + ": the warning says the table was truncated");
+    require(warnings[0].ref() == ref, what + ": the warning points at " + ref + ", not " +
+                                          warnings[0].ref());
+    require(warnings[0].message().contains(source_shape),
+            what + ": the warning names the source shape: " + warnings[0].message());
+}
+
+void verify_table_repetition_caps() {
+    const auto started = std::chrono::steady_clock::now();
+    {
+        docv1::Document doc;
+        std::string error;
+        std::vector<vlmv1::PageWarning> warnings;
+        require(vlm::mapping::map_otsl("<otsl>" + otsl_repetition_loop() + "</otsl>",
+                                       page_context(), &doc, &error, &warnings),
+                "OTSL loop maps: " + error);
+        require_capped(doc.tables(0).data(), warnings, "#/tables/0", "OTSL format");
+    }
+    {
+        docv1::Document doc;
+        std::string error;
+        std::vector<vlmv1::PageWarning> warnings;
+        require(vlm::mapping::map_doctags("<doctag><text>before</text><otsl>" +
+                                              otsl_repetition_loop() + "</otsl></doctag>",
+                                          page_context(), &doc, &error, &warnings),
+                "DocTags table loop maps: " + error);
+        require_capped(doc.tables(0).data(), warnings, "#/tables/0", "DocTags table");
+    }
+    {
+        // A chart's data table is capped the same way, and the warning
+        // points at the picture that carries it.
+        docv1::Document doc;
+        std::string error;
+        std::vector<vlmv1::PageWarning> warnings;
+        require(vlm::mapping::map_doctags("<doctag><chart><loc_0><loc_0><loc_9><loc_9>bar_chart"
+                                          "<otsl>" +
+                                              otsl_repetition_loop() + "</otsl></chart></doctag>",
+                                          page_context(), &doc, &error, &warnings),
+                "DocTags chart loop maps: " + error);
+        require_capped(doc.pictures(0).meta().tabular_chart().chart_data(), warnings,
+                       "#/pictures/0", "chart data");
+    }
+    {
+        std::string markdown = "|";
+        for (int i = 0; i < 4000; i++) {
+            markdown += " x |";
+        }
+        markdown += "\n";
+        for (int i = 0; i < 4000; i++) {
+            markdown += "| y |\n";
+        }
+        docv1::Document doc;
+        std::string error;
+        std::vector<vlmv1::PageWarning> warnings;
+        require(vlm::mapping::map_markdown(markdown, page_context(), &doc, &error, &warnings),
+                "markdown loop maps: " + error);
+        require_capped(doc.tables(0).data(), warnings, "#/tables/0", "markdown table");
+    }
+    {
+        // HTML goes through the same fill as markdown; a row past the column
+        // cap is enough to show it.
+        std::string html = "<table><tr>";
+        for (int i = 0; i < 300; i++) {
+            html += "<td>x</td>";
+        }
+        html += "</tr><tr><td>y</td></tr></table>";
+        docv1::Document doc;
+        std::string error;
+        std::vector<vlmv1::PageWarning> warnings;
+        require(vlm::mapping::map_html(html, page_context(), &doc, &error, &warnings),
+                "HTML wide table maps: " + error);
+        require_capped(doc.tables(0).data(), warnings, "#/tables/0", "HTML table",
+                       "2 rows by 300 columns");
+    }
+    require(std::chrono::steady_clock::now() - started < std::chrono::seconds(20),
+            "capped tables map in bounded time");
+
+    // A table inside the caps carries no warning.
+    docv1::Document doc;
+    std::string error;
+    std::vector<vlmv1::PageWarning> warnings;
+    require(vlm::mapping::map_otsl("<fcel>a<fcel>b<nl><fcel>c<fcel>d<nl>", page_context(), &doc,
+                                   &error, &warnings),
+            "small table maps: " + error);
+    require(warnings.empty() && doc.tables(0).data().grid_size() == 2,
+            "a table within the caps is untouched");
+}
+
+// The grid copies each anchor onto every position its span covers: long
+// spanned text, or spans overlapping each other (malformed), multiply that
+// past what one table may cost. The cells stay and the grid is left empty.
+void verify_table_grid_budget() {
+    {
+        // One anchor carrying 40 KB of text spans a 200 × 200 grid: 1.6 GB of
+        // copies.
+        std::string otsl = "<fcel>" + std::string(40000, 'z');
+        for (int c = 1; c < 200; c++) {
+            otsl += "<lcel>";
+        }
+        otsl += "<nl>";
+        for (int r = 1; r < 200; r++) {
+            for (int c = 0; c < 200; c++) {
+                otsl += "<xcel>";
+            }
+            otsl += "<nl>";
+        }
+        docv1::Document doc;
+        std::string error;
+        std::vector<vlmv1::PageWarning> warnings;
+        require(vlm::mapping::map_otsl(otsl, page_context(), &doc, &error, &warnings),
+                "long spanned text maps: " + error);
+        const docv1::TableData& data = doc.tables(0).data();
+        require(data.table_cells_size() == 1 && data.table_cells(0).row_span() == 200 &&
+                    data.table_cells(0).col_span() == 200,
+                "the spanning cell is kept");
+        require(data.grid_size() == 0, "the grid is left empty");
+        require(warnings.size() == 1 &&
+                    warnings[0].code() == vlmv1::PAGE_WARNING_CODE_TABLE_GRID_OMITTED &&
+                    warnings[0].ref() == "#/tables/0",
+                "the omitted grid is named in a warning");
+    }
+    {
+        // Diagonal anchors whose spans all overlap: about N³/3 copies.
+        constexpr int kSide = 220;
+        std::string otsl;
+        for (int r = 0; r < kSide; r++) {
+            for (int c = 0; c < kSide; c++) {
+                otsl += c == r ? "<fcel>d" : "<xcel>";
+            }
+            otsl += "<nl>";
+        }
+        docv1::Document doc;
+        std::string error;
+        std::vector<vlmv1::PageWarning> warnings;
+        require(vlm::mapping::map_otsl(otsl, page_context(), &doc, &error, &warnings),
+                "overlapping spans map: " + error);
+        require(doc.tables(0).data().table_cells_size() == kSide, "every anchor is kept");
+        require(warnings.size() == 1 &&
+                    warnings[0].code() == vlmv1::PAGE_WARNING_CODE_TABLE_GRID_OMITTED,
+                "overlapping spans past the budget drop the grid");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Image-crop attacks (direct calls against crafted rasters and boxes).
 // ---------------------------------------------------------------------------
 
@@ -962,6 +1139,8 @@ int main() {
     run("doctags_huge_loc_crop", verify_doctags_huge_loc_crop);
     run("doctags_text_edge_cases", verify_doctags_text_edge_cases);
     run("otsl_adversarial", verify_otsl_adversarial);
+    run("table_repetition_caps", verify_table_repetition_caps);
+    run("table_grid_budget", verify_table_grid_budget);
     run("image_crop_adversarial", verify_image_crop_adversarial);
     run("markdown_adversarial", verify_markdown_adversarial);
     run("html_adversarial", verify_html_adversarial);

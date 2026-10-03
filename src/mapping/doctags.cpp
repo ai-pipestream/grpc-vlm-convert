@@ -338,7 +338,7 @@ int emit_caption(const Element& element, const PageContext& page, docv1::Documen
 // embedded OTSL as tabular chart data. Each lands in meta and in the
 // annotations union.
 bool emit_picture(const Element& element, const PageContext& page, docv1::Document* doc,
-                  std::vector<BodyChild>* order) {
+                  std::vector<BodyChild>* order, std::vector<vlmv1::PageWarning>* warnings) {
     const docv1::BoundingBox box = locs_box(element.locs, page);
     const int caption_index = emit_caption(element, page, doc, order);
     docv1::PictureItem* picture = add_picture(doc, page, prov_with_charspan(page, box, 0, 0));
@@ -381,7 +381,10 @@ bool emit_picture(const Element& element, const PageContext& page, docv1::Docume
 
     if (element.name == "chart" && !element.otsl.empty()) {
         docv1::TableData chart_data;
-        if (parse_otsl_grid(element.otsl, &chart_data)) {
+        TableCut cut;
+        if (parse_otsl_grid(element.otsl, &chart_data, &cut)) {
+            note_table_cut(cut, chart_data, "chart data", body_child_ref(BodyChild::PICTURE, index),
+                           warnings);
             const std::string title = classification.empty() ? "other" : classification;
             auto* meta_chart = picture->mutable_meta()->mutable_tabular_chart();
             meta_chart->set_title(title);
@@ -411,7 +414,7 @@ bool emit_picture(const Element& element, const PageContext& page, docv1::Docume
 // element's own locations — docling's <inline> groups give every child
 // the chunk's shared box.
 bool emit_element(const Element& element, const PageContext& page, docv1::Document* doc,
-                  std::vector<BodyChild>* order,
+                  std::vector<BodyChild>* order, std::vector<vlmv1::PageWarning>* warnings,
                   const docv1::BoundingBox* forced_box = nullptr) {
     const std::string text = trim(element.text);
     const docv1::ProvenanceItem prov =
@@ -459,7 +462,7 @@ bool emit_element(const Element& element, const PageContext& page, docv1::Docume
         add_formula(doc, page, prov, text);
         index = doc->texts_size() - 1;
     } else if (tag == "picture" || tag == "chart") {
-        return emit_picture(element, page, doc, order);
+        return emit_picture(element, page, doc, order, warnings);
     } else if (tag == "table" || tag == "otsl") {
         const int caption_index = emit_caption(element, page, doc, order);
         const docv1::ProvenanceItem table_prov =
@@ -471,7 +474,10 @@ bool emit_element(const Element& element, const PageContext& page, docv1::Docume
         }
         const std::string& body = tag == "otsl" && element.otsl.empty() ? text : element.otsl;
         if (!body.empty()) {
-            parse_otsl_grid(body, table->mutable_data());
+            TableCut cut;
+            parse_otsl_grid(body, table->mutable_data(), &cut);
+            note_table_cut(cut, table->data(), "table",
+                           body_child_ref(BodyChild::TABLE, doc->tables_size() - 1), warnings);
         }
         return true;
     } else if (tag == "page_header" || tag == "page_footer") {
@@ -664,7 +670,8 @@ bool emit_list_group(const std::string& chunk, bool ordered, const PageContext& 
 // <inline>: an inline group whose children are the chunk's items, each
 // carrying the chunk's first (shared) box — docling's add_inline_group.
 bool emit_inline_group(const std::string& chunk, const PageContext& page,
-                       docv1::Document* doc, std::vector<BodyChild>* order) {
+                       docv1::Document* doc, std::vector<BodyChild>* order,
+                       std::vector<vlmv1::PageWarning>* warnings) {
     docv1::GroupItem* group = doc->add_groups();
     const std::string group_ref = body_child_ref(BodyChild::GROUP, doc->groups_size() - 1);
     group->set_name("group");  // docling's InlineGroup default name
@@ -719,7 +726,7 @@ bool emit_inline_group(const std::string& chunk, const PageContext& page,
         child.name = token;
         child.text = inner_text(child_chunk);
         std::vector<BodyChild> child_order;
-        if (!emit_element(child, page, doc, &child_order, &box)) {
+        if (!emit_element(child, page, doc, &child_order, warnings, &box)) {
             continue;
         }
         // The child is not a body child: parent it to the group instead.
@@ -746,7 +753,7 @@ bool emit_inline_group(const std::string& chunk, const PageContext& page,
 }  // namespace
 
 bool map_doctags(const std::string& text, const PageContext& page, docv1::Document* out,
-                 std::string* error) {
+                 std::string* error, std::vector<vlmv1::PageWarning>* warnings) {
     if (!text.contains('<')) {
         *error = "response holds no DocTags markup";
         return false;
@@ -762,7 +769,7 @@ bool map_doctags(const std::string& text, const PageContext& page, docv1::Docume
     size_t pos = 0;
 
     auto flush = [&] {
-        if (element_open && emit_element(current, page, out, &order)) {
+        if (element_open && emit_element(current, page, out, &order, warnings)) {
             items++;
         }
         current = Element{};
@@ -866,7 +873,7 @@ bool map_doctags(const std::string& text, const PageContext& page, docv1::Docume
             if (token == "key_value_region") {
                 emitted = emit_key_value_region(chunk, page, out, &order);
             } else if (token == "inline") {
-                emitted = emit_inline_group(chunk, page, out, &order);
+                emitted = emit_inline_group(chunk, page, out, &order, warnings);
             } else {
                 emitted = emit_list_group(chunk, token == "ordered_list", page, out, &order);
             }

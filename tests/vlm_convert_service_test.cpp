@@ -140,6 +140,13 @@ struct FakeVlm {
                 content = "# Converted Page\n\nA markdown paragraph.\n";
             } else if (png.contains("RAWTEXT")) {
                 content = "just plain words with no markup";
+            } else if (png.contains("WIDETABLE")) {
+                // A table row past the column cap, as a looping model emits.
+                content = "<doctag><otsl>";
+                for (int i = 0; i < 300; i++) {
+                    content += "<fcel>x";
+                }
+                content += "<nl></otsl></doctag>";
             } else {
                 content =
                     "<doctag>"
@@ -548,6 +555,28 @@ void verify_alternatives(const std::shared_ptr<grpc::Channel>& channel, FakeVlm*
     out = convert(channel, too_many, {page(1, "PAGE1")});
     require(out.status.error_code() == grpc::StatusCode::INVALID_ARGUMENT,
             "top_logprobs above 20 is INVALID_ARGUMENT");
+}
+
+// What the mapper cut to a cap rides beside the fragment on the wire; a
+// page with nothing cut carries no warning.
+void verify_page_warnings(const std::shared_ptr<grpc::Channel>& channel) {
+    vlmv1::ConvertOptions options;  // DocTags
+    Collected out = convert(channel, options, {page(1, "WIDETABLE1"), page(2, "PAGE2")});
+    require(out.status.ok() && out.documents.size() == 2, "both pages convert: " +
+                                                            out.status.error_message());
+    for (const vlmv1::PageDocument& document : out.documents) {
+        if (document.page_no() == 2) {
+            require(document.warnings_size() == 0, "an uncut page carries no warning");
+            continue;
+        }
+        require(document.warnings_size() == 1, "the cut table is reported");
+        const vlmv1::PageWarning& warning = document.warnings(0);
+        require(warning.code() == vlmv1::PAGE_WARNING_CODE_TABLE_TRUNCATED &&
+                    warning.ref() == "#/tables/0",
+                "the warning names the code and the table");
+        require(document.document().tables(0).data().num_cols() == 250,
+                "the table keeps the columns within the cap");
+    }
 }
 
 void verify_abort_on_error(const std::shared_ptr<grpc::Channel>& channel) {    vlmv1::ConvertOptions options;
@@ -962,6 +991,7 @@ int main() {
         verify_markdown_and_raw_fallback(server.channel);
         verify_stop_and_max_tokens(server.channel, &fake);
         verify_alternatives(server.channel, &fake);
+        verify_page_warnings(server.channel);
         verify_abort_on_error(server.channel);
         verify_error_matrix(server.channel);
         verify_api_key_and_overrides(&fake);

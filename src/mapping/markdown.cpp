@@ -53,8 +53,9 @@ std::vector<std::string> split_pipe_row(const std::string& line) {
 }
 
 void emit_pipe_table(const std::vector<std::string>& lines, const PageContext& page,
-                     docv1::Document* doc) {
+                     docv1::Document* doc, std::vector<vlmv1::PageWarning>* warnings) {
     docv1::TableItem* table = add_table(doc, page, page_prov(page));
+    const std::string ref = body_child_ref(BodyChild::TABLE, doc->tables_size() - 1);
     const size_t header_rows = lines.size() > 1 && is_separator_row(lines[1]) ? 1 : 0;
     std::vector<std::vector<std::string>> rows;
     for (size_t i = 0; i < lines.size(); i++) {
@@ -63,13 +64,14 @@ void emit_pipe_table(const std::vector<std::string>& lines, const PageContext& p
         }
         rows.push_back(split_pipe_row(lines[i]));
     }
-    fill_table_data(table->mutable_data(), rows, header_rows);
+    const TableCut cut = fill_table_data(table->mutable_data(), rows, header_rows);
+    note_table_cut(cut, table->data(), "table", ref, warnings);
 }
 
 }  // namespace
 
 bool map_markdown(const std::string& text, const PageContext& page, docv1::Document* out,
-                  std::string* error) {
+                  std::string* error, std::vector<vlmv1::PageWarning>* warnings) {
     if (trim(text).empty()) {
         *error = "empty markdown response";
         return false;
@@ -152,7 +154,7 @@ bool map_markdown(const std::string& text, const PageContext& page, docv1::Docum
                 i++;
             }
             i--;
-            emit_pipe_table(table_lines, page, out);
+            emit_pipe_table(table_lines, page, out, warnings);
             items++;
             continue;
         }

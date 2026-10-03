@@ -215,6 +215,37 @@ message PageDocument {
   // The page's items. DocTags responses carry real bounding boxes;
   // markdown/HTML/plaintext responses carry the full-page box only.
   ai.pipestream.document.v1.Document document = 2;
+  // Where the fragment is less than the model's answer: something cut to
+  // a server cap rather than mapped whole. Empty when nothing was cut.
+  repeated PageWarning warnings = 3;
+}
+
+// One place a converted page is less than the model's answer, reported
+// beside its fragment.
+message PageWarning {
+  // Which cap was hit.
+  PageWarningCode code = 1;
+  // Human-readable detail with the numbers involved; never the sole
+  // carrier of meaning.
+  string message = 2;
+  // Ref of the item the warning is about, in the fragment's own ref space
+  // ("#/tables/0", "#/pictures/3"); empty when it covers the whole page.
+  string ref = 3;
+}
+
+// What a page can lose to a server cap.
+enum PageWarningCode {
+  // Not set. Never emitted by the server.
+  PAGE_WARNING_CODE_UNSPECIFIED = 0;
+  // A table, or a chart's data table, held more rows, columns or cells
+  // than the server maps (a model repeating itself can emit millions);
+  // the item keeps the leading rows and columns that fit.
+  PAGE_WARNING_CODE_TABLE_TRUNCATED = 1;
+  // A table's grid (each cell copied onto every position its span covers)
+  // would have cost more than the server spends on one, through
+  // overlapping spans or long spanned text; the item keeps its cells and
+  // an empty grid.
+  PAGE_WARNING_CODE_TABLE_GRID_OMITTED = 2;
 }
 
 // Unmapped model output or a page failure.

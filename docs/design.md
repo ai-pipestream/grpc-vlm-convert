@@ -115,6 +115,20 @@ synchronous route passes the connection's liveness as the pipeline's
 | OTSL | table-shaped items |
 | Plaintext | one `TextItem` per page |
 
+### Size caps and page warnings
+
+Every mapper builds tables as a full rows × columns grid, so a model stuck
+repeating itself (one 4000-cell row, then thousands of short rows) would
+otherwise produce sixteen million `TableCell`s for one page. Tables, and a
+chart's data table, keep at most their leading 2000 rows and 250 columns
+within 50 000 grid cells. A grid whose cell copies (each anchor copied
+onto every position its span covers) would cost more than 32 MiB, through
+overlapping spans or long spanned text, is left empty and the cells stay.
+Whatever was cut is reported beside the fragment as a typed `PageWarning`
+on `PageDocument.warnings` (`PAGE_WARNING_CODE_TABLE_TRUNCATED` /
+`PAGE_WARNING_CODE_TABLE_GRID_OMITTED`, the item's ref, and a message with
+the numbers), so a cut table never passes for a complete one.
+
 ### HTML mapping rules
 
 Block matching spans newlines, since model output wraps its markup. A

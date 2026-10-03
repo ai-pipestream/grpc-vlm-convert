@@ -324,10 +324,17 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
         }
         std::string map_error;
         docv1::Document fragment;
-        if (mapping::map_response(job.format, result.text, page, &fragment, &map_error)) {
+        std::vector<vlmv1::PageWarning> warnings;
+        if (mapping::map_response(job.format, result.text, page, &fragment, &map_error,
+                                  &warnings)) {
             auto* document = event->mutable_page_document();
             document->set_page_no(page.page_no);
             *document->mutable_document() = std::move(fragment);
+            // What the mapper cut to a server cap rides beside the
+            // fragment, so a short table never passes for a complete one.
+            for (vlmv1::PageWarning& warning : warnings) {
+                *document->add_warnings() = std::move(warning);
+            }
         } else {
             // The model answered but not in its declared format: keep the
             // raw text, tag the reason.

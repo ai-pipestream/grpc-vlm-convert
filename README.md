@@ -126,7 +126,9 @@ Clients stream `ConvertPagesRequest` (one `ConvertOptions`, then one
 `PageImage` PNG per page) and receive `PageStarted` / `PageDocument` /
 `PageRaw` events per page in completion order: a page is emitted the
 moment its VLM call returns, out-of-order pages are legal and key on
-`page_no`. A `ConvertComplete` trailer closes the stream. Health
+`page_no`. A `PageDocument` lists anything cut to a server cap as typed
+`PageWarning`s beside its fragment (a table past the row, column or cell
+caps, ...). A `ConvertComplete` trailer closes the stream. Health
 (`grpc.health.v1.Health`) and server reflection are registered.
 `GetServiceInfo` also carries a `UiInfo` block (title, path,
 description) advertising this service's tab to the shared demo shell.

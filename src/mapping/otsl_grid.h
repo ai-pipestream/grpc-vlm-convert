@@ -10,14 +10,18 @@
 
 namespace vlm::mapping {
 
+struct TableCut;
+
 // Parses OTSL cell tokens into a table grid with docling's span
 // resolution: <lcel>/<ucel>/<xcel> filler cells extend their anchor
 // cell's col_span/row_span (and end offsets) and are not emitted;
 // <srow> starts a new (section) row; <nl> ends a row. The grid is the
 // full num_rows × num_cols matrix with anchors stamped over every
-// position their span covers. Returns false when the body holds no
-// complete row.
-bool parse_otsl_grid(const std::string& body,
-                     ai::pipestream::document::v1::TableData* data);
+// position their span covers. Only the leading rows and columns within
+// the table caps (builder.h) are kept, and the grid is left empty when its
+// copies would cost more than kMaxGridBytes; `cut`, when given, says what
+// was dropped. Returns false when the body holds no complete row.
+bool parse_otsl_grid(const std::string& body, ai::pipestream::document::v1::TableData* data,
+                     TableCut* cut = nullptr);
 
 }  // namespace vlm::mapping
