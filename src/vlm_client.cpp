@@ -250,14 +250,26 @@ VlmResult generate(const VlmCall& call) {
         return result;
     }
 
-    nlohmann::json parsed = nlohmann::json::parse(response->body, nullptr, false);
+    const nlohmann::json parsed = nlohmann::json::parse(response->body, nullptr, false);
     if (parsed.is_discarded()) {
         result.error = "endpoint returned non-JSON body";
         return result;
     }
-    // Key access goes through contains(): const operator[] on a missing
-    // key is undefined behavior, and endpoints omit fields freely.
-    const auto& choices = parsed["choices"];
+    // Anything but an object fails here: a keyed lookup on an array, a
+    // string or a number throws, and a throw out of a worker thread ends
+    // the process.
+    if (!parsed.is_object()) {
+        result.error = "endpoint returned JSON that is not a chat completion object";
+        return result;
+    }
+    // Key access goes through find()/contains(): const operator[] on a
+    // missing key is undefined behavior, and endpoints omit fields freely.
+    const auto choices_entry = parsed.find("choices");
+    if (choices_entry == parsed.end()) {
+        result.error = "chat completion has no message content";
+        return result;
+    }
+    const auto& choices = *choices_entry;
     if (!choices.is_array() || choices.empty() || !choices[0].is_object() ||
         !choices[0].contains("message") || !choices[0]["message"].is_object() ||
         !choices[0]["message"].contains("content") ||

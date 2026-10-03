@@ -633,6 +633,15 @@ void verify_client_adversarial(ScriptVlm* fake) {
     fake->script = {{200, "{\"error\":{\"message\":\"boom\"}}"}};
     require(!vlm::generate(call_to(fake->endpoint())).ok, "200 with an error body fails");
 
+    // Valid JSON that is not an object: a keyed lookup on any of these
+    // throws, and a throw out of a worker thread ends the whole process.
+    for (const char* body : {"[1,2,3]", "\"just a string\"", "42", "null", "true"}) {
+        fake->script = {{200, body}};
+        const vlm::VlmResult not_object = vlm::generate(call_to(fake->endpoint()));
+        require(!not_object.ok && !not_object.error.empty(),
+                std::string("non-object JSON fails the page cleanly: ") + body);
+    }
+
     // A garbage Retry-After does not break the retry policy.
     fake->attempts = 0;
     fake->script = {{503, "{\"error\":\"busy\"}"}, {200, completion("\"ok\"")}};
