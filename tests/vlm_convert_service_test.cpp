@@ -544,6 +544,20 @@ void verify_service_info(const std::shared_ptr<grpc::Channel>& channel,
     require(info2.raw_presets_size() == 1 && info2.raw_presets(0) == "unlimited-ocr",
             "unknown preset names are reported raw");
     server.stop();
+
+    // The RPC is unauthenticated: an endpoint whose path and query carry a
+    // tenant token is reported as scheme, host and port only.
+    vlm::Config secret_path;
+    secret_path.endpoint = endpoint + "/tenant/PATH-SECRET?key=QUERY-SECRET";
+    TestServer server3(secret_path);
+    auto stub3 = vlmv1::VlmConvertService::NewStub(server3.channel);
+    grpc::ClientContext context3;
+    vlmv1::GetServiceInfoResponse info3;
+    require(stub3->GetServiceInfo(&context3, request, &info3).ok(), "GetServiceInfo OK (3)");
+    require(info3.endpoint() == endpoint, "the reported endpoint is the origin: " +
+                                              info3.endpoint());
+    require(!info3.DebugString().contains("SECRET"), "no part of the token is reported");
+    server3.stop();
 }
 
 }  // namespace

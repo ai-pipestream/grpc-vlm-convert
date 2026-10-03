@@ -1,7 +1,12 @@
 #include "vlm_client.h"
 
+#include <algorithm>
 #include <atomic>
+#include <cctype>
+#include <charconv>
 #include <chrono>
+#include <string_view>
+#include <system_error>
 #include <thread>
 
 #include <httplib.h>
@@ -49,26 +54,112 @@ std::string base64_encode(const std::string& bytes) {
     return out;
 }
 
-// Splits "http://host:port/base" into the origin httplib connects to and
-// the path prefix requests go under.
-bool split_endpoint(const std::string& endpoint, std::string* origin, std::string* path) {
-    const std::string scheme = "http://";
-    if (!endpoint.starts_with(scheme) || endpoint.size() == scheme.size()) {
-        return false;
+// An endpoint taken apart: the origin httplib connects to and the request
+// target the chat completion posts to.
+struct ParsedEndpoint {
+    // "http://host[:port]", never with userinfo.
+    std::string origin;
+    // Path plus query, e.g. "/base/v1/chat/completions?tenant=a".
+    std::string target;
+};
+
+bool host_char(char c) {
+    return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '.' || c == '-' || c == '_';
+}
+
+bool ipv6_char(char c) {
+    return std::isxdigit(static_cast<unsigned char>(c)) != 0 || c == ':' || c == '.';
+}
+
+// Parses http://host[:port][/path][?query][#fragment] into what a request
+// needs. Returns an empty string on success, else why the endpoint is
+// unusable, phrased without quoting it. httplib's own URL parser takes
+// "user:pw@host" apart as host "user", port "pw@host", and leaves the
+// client null when the port does not parse, so everything it would choke
+// on is refused here first.
+std::string parse_endpoint(const std::string& endpoint, ParsedEndpoint* out) {
+    constexpr std::string_view kScheme = "http://";
+    if (!endpoint.starts_with(kScheme)) {
+        return "endpoint must be an http:// URL (https is not supported; put a TLS proxy beside "
+               "the VLM)";
     }
-    size_t slash = endpoint.find('/', scheme.size());
-    if (slash == std::string::npos) {
-        *origin = endpoint;
-        *path = "";
-    } else {
-        *origin = endpoint.substr(0, slash);
-        *path = endpoint.substr(slash);
-        // Trailing slashes would produce "//v1/chat/completions".
-        while (path->ends_with('/')) {
-            path->pop_back();
+    for (const char c : endpoint) {
+        const auto byte = static_cast<unsigned char>(c);
+        if (byte <= 0x20 || byte == 0x7f) {
+            return "endpoint must not contain whitespace or control characters";
         }
     }
-    return true;
+    const std::string_view rest = std::string_view(endpoint).substr(kScheme.size());
+    const size_t authority_end = rest.find_first_of("/?#");
+    const std::string_view authority = rest.substr(0, authority_end);
+    if (authority.contains('@')) {
+        return "endpoint must not carry credentials (user:password@); set GRPC_VLM_API_KEY "
+               "instead";
+    }
+
+    std::string_view host = authority;
+    std::string_view port;
+    bool has_port = false;
+    if (authority.starts_with('[')) {
+        const size_t close = authority.find(']');
+        if (close == std::string_view::npos || close == 1 ||
+            !std::ranges::all_of(authority.substr(1, close - 1), ipv6_char)) {
+            return "endpoint host must be a name or a bracketed IPv6 literal";
+        }
+        host = authority.substr(0, close + 1);
+        const std::string_view after = authority.substr(close + 1);
+        if (!after.empty()) {
+            if (after[0] != ':') {
+                return "endpoint host must be a name or a bracketed IPv6 literal";
+            }
+            has_port = true;
+            port = after.substr(1);
+        }
+    } else {
+        const size_t colon = authority.find(':');
+        if (colon != std::string_view::npos) {
+            host = authority.substr(0, colon);
+            has_port = true;
+            port = authority.substr(colon + 1);
+        }
+        if (host.empty() || !std::ranges::all_of(host, host_char)) {
+            return "endpoint needs a host of letters, digits, '.', '-' or '_'";
+        }
+    }
+    if (has_port) {
+        unsigned value = 0;
+        const auto [end, failure] = std::from_chars(port.data(), port.data() + port.size(), value);
+        if (port.empty() || failure != std::errc() || end != port.data() + port.size() ||
+            value < 1 || value > 65535) {
+            return "endpoint port must be a number from 1 to 65535";
+        }
+    }
+    out->origin = "http://" + std::string(host) + (has_port ? ":" + std::string(port) : "");
+
+    // Path and query; a fragment never leaves the client.
+    std::string_view tail =
+        authority_end == std::string_view::npos ? std::string_view() : rest.substr(authority_end);
+    tail = tail.substr(0, tail.find('#'));
+    const size_t question = tail.find('?');
+    std::string path(tail.substr(0, question));
+    const std::string query(question == std::string_view::npos ? std::string_view()
+                                                                : tail.substr(question));
+    // Trailing slashes would produce "//v1/chat/completions".
+    while (path.ends_with('/')) {
+        path.pop_back();
+    }
+    // A full completions URL (Docling's ApiVlmOptions.url) is used as is;
+    // an OpenAI-style base ending in /v1 gets the rest of the route; any
+    // other base gets the whole route.
+    if (path.ends_with("/chat/completions")) {
+        out->target = path;
+    } else if (path.ends_with("/v1")) {
+        out->target = path + "/chat/completions";
+    } else {
+        out->target = path + "/v1/chat/completions";
+    }
+    out->target += query;
+    return "";
 }
 
 }  // namespace
@@ -76,26 +167,23 @@ bool split_endpoint(const std::string& endpoint, std::string* origin, std::strin
 void set_retry_backoff_base_ms(long ms) { g_backoff_base_ms.store(ms); }
 
 std::string endpoint_error(const std::string& endpoint) {
-    std::string origin, path;
-    if (!split_endpoint(endpoint, &origin, &path)) {
-        return "endpoint must be http://host[:port][/path], got: " + endpoint;
-    }
-    return "";
+    ParsedEndpoint parsed;
+    return parse_endpoint(endpoint, &parsed);
 }
 
 std::string endpoint_origin(const std::string& endpoint) {
-    std::string origin, path;
-    if (!split_endpoint(endpoint, &origin, &path)) {
-        return endpoint;
+    ParsedEndpoint parsed;
+    if (!parse_endpoint(endpoint, &parsed).empty()) {
+        return "<invalid endpoint>";
     }
-    return origin;
+    return parsed.origin;
 }
 
 VlmResult generate(const VlmCall& call) {
     VlmResult result;
-    std::string origin, path;
-    if (!split_endpoint(call.endpoint, &origin, &path)) {
-        result.error = endpoint_error(call.endpoint);
+    ParsedEndpoint where;
+    if (std::string problem = parse_endpoint(call.endpoint, &where); !problem.empty()) {
+        result.error = std::move(problem);
         return result;
     }
 
@@ -125,11 +213,18 @@ VlmResult generate(const VlmCall& call) {
     for (;;) {
         // A fresh client per attempt: after a connect-level failure the
         // previous one's socket state is useless anyway.
-        httplib::Client client(origin);
+        httplib::Client client(where.origin);
+        if (!client.is_valid()) {
+            // parse_endpoint refuses what httplib cannot take apart, so this
+            // is a backstop: a client that did not construct must never be
+            // used (its calls dereference null).
+            result.error = "endpoint is not usable: " + where.origin;
+            return result;
+        }
         client.set_connection_timeout(call.timeout_seconds, 0);
         client.set_read_timeout(call.timeout_seconds, 0);
         client.set_write_timeout(call.timeout_seconds, 0);
-        response = client.Post(path + "/v1/chat/completions", payload, "application/json");
+        response = client.Post(where.target, payload, "application/json");
         const bool retryable = response ? retryable_status(response->status)
                                         : retryable_transport(response.error());
         if (!retryable || retries == kMaxRetries) {
@@ -144,7 +239,7 @@ VlmResult generate(const VlmCall& call) {
         }
     }
     if (!response) {
-        result.error = "endpoint unreachable: " + origin;
+        result.error = "endpoint unreachable: " + where.origin;
         return result;
     }
     if (response->status != 200) {

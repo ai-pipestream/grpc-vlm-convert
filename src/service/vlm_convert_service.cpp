@@ -364,7 +364,11 @@ grpc::Status VlmConvertServiceImpl::GetServiceInfo(
     grpc::ServerContext* /*context*/, const vlmv1::GetServiceInfoRequest* /*request*/,
     vlmv1::GetServiceInfoResponse* response) {
     response->set_version(GRPC_VLM_VERSION);
-    response->set_endpoint(config_.endpoint);
+    // Scheme, host and port only: this RPC is unauthenticated, and
+    // deployments put tokens in the endpoint's path and query.
+    if (!config_.endpoint.empty()) {
+        response->set_endpoint(endpoint_origin(config_.endpoint));
+    }
     // Report what the configured endpoint claims to serve; with no
     // endpoint nothing claims anything.
     if (!config_.endpoint.empty()) {

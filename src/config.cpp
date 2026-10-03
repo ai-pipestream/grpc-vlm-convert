@@ -4,6 +4,8 @@
 #include <stdexcept>
 #include <string>
 
+#include "vlm_client.h"
+
 namespace vlm {
 
 namespace {
@@ -57,6 +59,13 @@ Config load_config_from_env() {
     Config config;
     config.listen_address = configured_string("GRPC_VLM_LISTEN_ADDRESS", config.listen_address);
     config.endpoint = configured_string("GRPC_VLM_ENDPOINT", config.endpoint);
+    if (!config.endpoint.empty()) {
+        // Fail at startup rather than on every RPC, and without echoing
+        // the value: a token in its path would land in the log.
+        if (const std::string problem = endpoint_error(config.endpoint); !problem.empty()) {
+            throw std::invalid_argument("GRPC_VLM_ENDPOINT: " + problem);
+        }
+    }
     config.presets = configured_list("GRPC_VLM_PRESETS");
     config.concurrency = configured_size("GRPC_VLM_CONCURRENCY", config.concurrency, 1, 64);
     config.max_page_bytes = configured_size("GRPC_VLM_MAX_PAGE_BYTES", config.max_page_bytes,
@@ -75,6 +84,18 @@ Config load_config_from_env() {
         config.http_port = configured_size("GRPC_VLM_HTTP_PORT", config.http_port, 1, 65535);
     }
     return config;
+}
+
+std::string startup_banner(const Config& config) {
+    std::string banner = "grpc-vlm-convert listening on " + config.listen_address;
+    if (config.http_port != 0) {
+        banner += " (HTTP on 0.0.0.0:" + std::to_string(config.http_port) + ")";
+    }
+    banner += " (endpoint ";
+    banner += config.endpoint.empty() ? "<none — per-request override required>"
+                                      : endpoint_origin(config.endpoint);
+    banner += ")";
+    return banner;
 }
 
 }  // namespace vlm

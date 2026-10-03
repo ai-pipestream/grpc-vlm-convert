@@ -11,9 +11,11 @@ namespace vlm {
 // from what the operator wrote.
 struct Config {
     std::string listen_address = "0.0.0.0:50058";
-    // OpenAI-compatible VLM endpoint, e.g. "http://vlm:8080". Empty is
-    // legal at startup — ConvertPages then requires a per-request
-    // endpoint override and fails with FAILED_PRECONDITION otherwise.
+    // OpenAI-compatible VLM endpoint, e.g. "http://vlm:8080" or a full
+    // ".../v1/chat/completions" URL. Empty is legal at startup —
+    // ConvertPages then requires a per-request endpoint override and fails
+    // with FAILED_PRECONDITION otherwise. Never printed or returned whole:
+    // only endpoint_origin() of it leaves the process.
     std::string endpoint;
     // Preset names the configured endpoint claims to serve (comma list).
     // Empty means "every built-in preset" when an endpoint is set.
@@ -33,7 +35,14 @@ struct Config {
 };
 
 // Reads and validates the environment. Throws std::invalid_argument with
-// the variable name and accepted range on any malformed value.
+// the variable name and accepted range on any malformed value; a malformed
+// endpoint is named by its variable, never quoted.
 Config load_config_from_env();
+
+// The line main prints once it listens: the listen addresses and the
+// endpoint, reduced to scheme, host and port (endpoint_origin) because
+// deployments put tokens in its path and query. It never names a
+// credential.
+std::string startup_banner(const Config& config);
 
 }  // namespace vlm

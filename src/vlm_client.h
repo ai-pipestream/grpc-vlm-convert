@@ -8,8 +8,12 @@ namespace vlm {
 
 // One page's call to the VLM endpoint.
 struct VlmCall {
-    // OpenAI-compatible base, e.g. "http://vlm:8080" (an optional path
-    // prefix is honored). /v1/chat/completions is appended.
+    // OpenAI-compatible endpoint in one of three shapes: a base such as
+    // "http://vlm:8080" (an optional path prefix is honored), which gets
+    // /v1/chat/completions appended; an OpenAI-style base ending in /v1,
+    // which gets /chat/completions; or a full chat completions URL ending
+    // in /chat/completions (Docling's ApiVlmOptions.url), used as is. A
+    // query string rides along on the request.
     std::string endpoint;
     // Model name forwarded verbatim ("model" field on the wire).
     std::string model;
@@ -75,8 +79,9 @@ struct VlmResult {
     uint64_t completion_tokens = 0;
 };
 
-// Calls {endpoint}/v1/chat/completions with the page image inline as a
-// data URL. Blocking; meant for the worker pool. Retries like docling's
+// Posts one chat completion to the endpoint (VlmCall::endpoint lists the
+// shapes it takes) with the page image inline as a data URL. Blocking;
+// meant for the worker pool. Retries like docling's
 // api_image_request: up to 5 retries with exponential backoff (100ms
 // base) on HTTP 429/500/502/503/504 and on connect-level transport
 // failures (vLLM still starting); other statuses, and 200s that do not
@@ -88,14 +93,18 @@ VlmResult generate(const VlmCall& call);
 // Tests set this to 0 so persistent-failure cases do not sleep ~3s.
 void set_retry_backoff_base_ms(long ms);
 
-// Validates an endpoint string enough to fail fast at RPC start
-// (scheme://host[:port][/path], http only). Empty detail when valid.
+// Validates an endpoint string enough to fail fast at startup and at RPC
+// start: http://host[:port][/path][?query], a host of letters, digits,
+// '.', '-', '_' (or a bracketed IPv6 literal), a port from 1 to 65535,
+// and no user:password@ part. Empty detail when valid. The detail never
+// quotes the endpoint: deployments put tokens in it.
 std::string endpoint_error(const std::string& endpoint);
 
-// Scheme and authority of an endpoint, dropping any path prefix: what a
-// fragment records about who answered. The path is dropped on purpose —
-// deployments put tokens in it. Returns the input unchanged when it does
-// not parse as an endpoint.
+// The endpoint as it may be shown: scheme, host and port only. Userinfo,
+// path, query and fragment are dropped on purpose, because deployments put
+// tokens in all of them. Startup logs, GetServiceInfo, error text and the
+// GenerationSource a fragment records use this, never the endpoint itself.
+// Returns "<invalid endpoint>" when the string does not parse.
 std::string endpoint_origin(const std::string& endpoint);
 
 }  // namespace vlm

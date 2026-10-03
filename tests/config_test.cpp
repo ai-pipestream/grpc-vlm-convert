@@ -96,6 +96,35 @@ void verify_range_validation() {
     clear_env();
 }
 
+// A malformed endpoint stops the process at startup, named by its variable
+// and never quoted (a token in it would land in the log). The startup line
+// shows the endpoint as scheme, host and port only.
+void verify_endpoint_validation_and_banner() {
+    clear_env();
+    require(rejects("GRPC_VLM_ENDPOINT", "https://vlm:8080"), "https endpoint is refused");
+    require(rejects("GRPC_VLM_ENDPOINT", "http://vlm:notaport"), "bad port is refused");
+    ::setenv("GRPC_VLM_ENDPOINT", "http://alice:hunter2@vlm:8080", 1);
+    try {
+        (void)vlm::load_config_from_env();
+        require(false, "userinfo endpoint is refused");
+    } catch (const std::invalid_argument& error) {
+        require(std::string(error.what()).contains("GRPC_VLM_ENDPOINT"),
+                "the error names the variable");
+        require(!std::string(error.what()).contains("hunter2"),
+                "the error does not quote the credentials");
+    }
+
+    ::setenv("GRPC_VLM_ENDPOINT", "http://vlm:8080/tenant/PATH-SECRET?key=QUERY-SECRET", 1);
+    const vlm::Config config = vlm::load_config_from_env();
+    const std::string banner = vlm::startup_banner(config);
+    require(banner.contains("grpc-vlm-convert listening on"),
+            "the banner keeps the line the smoke test waits for");
+    require(banner.contains("(endpoint http://vlm:8080)"), "the banner shows the origin: " +
+                                                               banner);
+    require(!banner.contains("SECRET"), "the banner drops the path and query: " + banner);
+    clear_env();
+}
+
 void verify_http_port_disable() {
     clear_env();
     ::setenv("GRPC_VLM_HTTP_PORT", "0", 1);
@@ -115,6 +144,7 @@ int main() {
         verify_defaults();
         verify_overrides_and_lists();
         verify_range_validation();
+        verify_endpoint_validation_and_banner();
         verify_http_port_disable();
     } catch (const std::exception& error) {
         std::println(stderr, "{}", error.what());

@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <cmath>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -34,13 +35,26 @@ struct ScriptableVlm {
     // The top_logprobs value the last request asked for, -1 when the
     // request omitted the parameter.
     std::atomic<int> asked_top_logprobs{-1};
+    // The request target (path and query) of the last call, as it arrived.
+    std::mutex target_mutex;
+    std::string last_target;
+
+    std::string target() {
+        std::lock_guard<std::mutex> lock(target_mutex);
+        return last_target;
+    }
 
     void start() {
-        // The same completions handler under a base path: split_endpoint
-        // must post to {prefix}/v1/chat/completions for prefixed endpoints.
+        // The same completions handler under a base path: the client must
+        // post to {prefix}/v1/chat/completions for prefixed endpoints, and
+        // to {base}/chat/completions for an OpenAI-style base ending in /v1.
         const auto handler = [this](const httplib::Request& request,
                                     httplib::Response& response) {
             attempts++;
+            {
+                std::lock_guard<std::mutex> lock(target_mutex);
+                last_target = request.target;
+            }
             const nlohmann::json asked =
                 nlohmann::json::parse(request.body, nullptr, false);
             asked_top_logprobs = asked.is_object() && asked.contains("top_logprobs")
@@ -87,6 +101,7 @@ struct ScriptableVlm {
         };
         server.Post("/v1/chat/completions", handler);
         server.Post("/base/v1/chat/completions", handler);
+        server.Post("/gw/v1/chat/completions", handler);
         port = server.bind_to_any_port("127.0.0.1");
         require(port > 0, "fake VLM bound");
         thread = std::thread([this] { server.listen_after_bind(); });
@@ -122,14 +137,72 @@ int main() {
         // optional path prefix allowed.
         require(vlm::endpoint_error("http://vlm:8080").empty(), "plain origin validates");
         require(vlm::endpoint_error("http://vlm:8080/base").empty(), "path prefix validates");
+        require(vlm::endpoint_error("http://vlm").empty(), "a port is optional");
+        require(vlm::endpoint_error("http://[::1]:8080").empty(), "bracketed IPv6 validates");
+        require(vlm::endpoint_error("http://vlm:8080/v1/chat/completions?api-version=2").empty(),
+                "a full completions URL with a query validates");
         require(!vlm::endpoint_error("https://vlm:8080").empty(), "https is rejected");
         require(!vlm::endpoint_error("http://").empty(), "scheme without a host is rejected");
         require(!vlm::endpoint_error("vlm:8080").empty(), "missing scheme is rejected");
+        // What httplib would take apart wrongly (and then dereference a null
+        // client for) is refused up front.
+        for (const char* broken : {"http://vlm:abc", "http://vlm:0", "http://vlm:99999",
+                                   "http://vlm:", "http://[::1", "http://vl m:8080",
+                                   "http://vlm:8080/a b", "http://vlm\n:8080"}) {
+            require(!vlm::endpoint_error(broken).empty(),
+                    std::string("malformed endpoint is rejected: ") + broken);
+        }
+        // Credentials in the URL are refused, and the reason never repeats
+        // them.
+        const std::string with_userinfo = "http://alice:hunter2@vlm:8080/v1";
+        const std::string userinfo_error = vlm::endpoint_error(with_userinfo);
+        require(!userinfo_error.empty(), "userinfo is rejected");
+        require(!userinfo_error.contains("hunter2") && !userinfo_error.contains("alice"),
+                "the rejection does not echo the credentials: " + userinfo_error);
+        require(!vlm::endpoint_error("http://vlm:8080/tenant/SECRET-TOKEN x").contains(
+                    "SECRET-TOKEN"),
+                "a rejection never quotes the endpoint");
+
+        // A bad port is an error result, not a crash (httplib leaves its
+        // client null when the port does not parse).
+        vlm::VlmResult bad_port = vlm::generate(call_to("http://127.0.0.1:99999"));
+        require(!bad_port.ok && !bad_port.error.empty(), "a bad port fails cleanly");
 
         // A path-prefixed endpoint posts under the prefix.
         vlm::VlmResult prefixed = vlm::generate(call_to(fake.endpoint() + "/base"));
         require(prefixed.ok, "prefixed endpoint resolves: " + prefixed.error);
         require(prefixed.text == "<doctag/>", "prefixed endpoint answer");
+        require(fake.target() == "/base/v1/chat/completions", "prefix gets the whole route");
+
+        // A Docling-style full completions URL is used as is, never with
+        // a second /v1/chat/completions on the end.
+        vlm::VlmResult full = vlm::generate(call_to(fake.endpoint() + "/v1/chat/completions"));
+        require(full.ok, "a full completions URL resolves: " + full.error);
+        require(fake.target() == "/v1/chat/completions", "a full URL is not doubled");
+        full = vlm::generate(call_to(fake.endpoint() + "/base/v1/chat/completions/"));
+        require(full.ok && fake.target() == "/base/v1/chat/completions",
+                "a full URL with a prefix and a trailing slash is used as is");
+
+        // An OpenAI-style base (ending in /v1) gets only the rest of the
+        // route.
+        vlm::VlmResult openai_base = vlm::generate(call_to(fake.endpoint() + "/gw/v1"));
+        require(openai_base.ok, "an OpenAI-style base resolves: " + openai_base.error);
+        require(fake.target() == "/gw/v1/chat/completions", "a /v1 base is not doubled");
+
+        // A query string rides along on the request.
+        vlm::VlmResult queried = vlm::generate(call_to(fake.endpoint() + "/base?tenant=a"));
+        require(queried.ok, "an endpoint with a query resolves: " + queried.error);
+        require(fake.target() == "/base/v1/chat/completions?tenant=a",
+                "the query follows the completions route: " + fake.target());
+
+        // Unreachable endpoints name the origin only: a token in the path
+        // or the query never reaches the error text.
+        vlm::VlmResult unreachable =
+            vlm::generate(call_to("http://127.0.0.1:1/tenant/PATH-TOKEN?key=QUERY-TOKEN"));
+        require(!unreachable.ok, "nothing listens on port 1");
+        require(!unreachable.error.contains("PATH-TOKEN") &&
+                    !unreachable.error.contains("QUERY-TOKEN"),
+                "the unreachable error is redacted: " + unreachable.error);
         fake.attempts = 0;
 
         // Generation facts: the answering model, the stop reason verbatim,
@@ -159,6 +232,13 @@ int main() {
                 "endpoint origin drops the path");
         require(vlm::endpoint_origin("http://vlm:8080") == "http://vlm:8080",
                 "a bare origin is unchanged");
+        require(vlm::endpoint_origin("http://vlm:8080?key=secret") == "http://vlm:8080",
+                "endpoint origin drops a query that follows the authority directly");
+        require(vlm::endpoint_origin("http://vlm:8080/v1#frag") == "http://vlm:8080",
+                "endpoint origin drops the fragment");
+        // An endpoint that does not parse is never shown as typed.
+        require(vlm::endpoint_origin("http://alice:hunter2@vlm:8080") == "<invalid endpoint>",
+                "a rejected endpoint is shown as a placeholder, not echoed");
         fake.attempts = 0;
 
         // Alternates: the parameter is omitted unless asked for, and what

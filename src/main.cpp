@@ -103,12 +103,7 @@ int main() {
             });
         }
 
-        std::println("grpc-vlm-convert listening on {}{} (endpoint {})", config.listen_address,
-                     config.http_port != 0
-                         ? " (HTTP on 0.0.0.0:" + std::to_string(config.http_port) + ")"
-                         : "",
-                     config.endpoint.empty() ? "<none — per-request override required>"
-                                             : config.endpoint);
+        std::println("{}", vlm::startup_banner(config));
         server->Wait();
 
         http_gateway.stop();
