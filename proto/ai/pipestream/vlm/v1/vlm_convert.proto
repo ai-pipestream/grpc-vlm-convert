@@ -28,7 +28,9 @@ service VlmConvertService {
   // mapping fails or the endpoint errors) in completion order, and a
   // single ConvertComplete trailer. Pages are admitted as they fit the
   // server's buffer budgets, so a client sending faster than the model
-  // answers is held back by flow control.
+  // answers is held back by flow control. Those budgets count input bytes
+  // only: converted pages wait in server memory, unbounded, until the
+  // client reads them, so read responses while uploading.
   //
   // Errors: no endpoint configured (and no per-request override) is
   // FAILED_PRECONDITION; an endpoint override the server does not allow

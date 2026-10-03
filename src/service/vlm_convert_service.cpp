@@ -203,8 +203,14 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
     // bounded by the leases its jobs carry. The event queue is not bounded
     // on purpose: a client that uploads every page before it reads a single
     // event (gRParse does) would otherwise deadlock against a full event
-    // queue, and what it can hold is capped anyway at two events per page
-    // for at most max_pages pages.
+    // queue. Its count is capped at two events per page for at most
+    // max_pages pages, but its bytes are not: the budgets count input PNG
+    // bytes only and are given back once a page is mapped, so finished
+    // PageDocuments (text, tables, picture crops) pile up here for as long
+    // as the client does not read. Clients must read events while they
+    // upload. Bounding this queue (say, a page keeps its stream lease until
+    // the writer hands its event to Write) is the follow-up once gRParse
+    // reads concurrently; doing it now would deadlock gRParse.
     Budget stream_bytes(config_.max_stream_buffered_bytes);
     Channel<PageJob> jobs;
     Channel<vlmv1::ConvertPagesResponse> events;

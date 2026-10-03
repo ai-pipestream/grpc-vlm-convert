@@ -303,10 +303,22 @@ page and reads nothing more, so gRPC flow control holds a client that
 sends faster than the model answers; waiters are served in arrival
 order. The event queue is deliberately not bounded: a client that
 uploads every page before reading any event (gRParse does) would
-otherwise deadlock against it, and it holds at most two events per page
-for at most `max_pages` pages. Every VLM call also takes one of the
-server's `GRPC_VLM_MAX_INFLIGHT` slots, so many streams cannot pile
-requests onto an endpoint that serves one at a time.
+otherwise deadlock against it. It holds at most two events per page for
+at most `max_pages` pages, but **the bytes of queued output are not
+bounded**: both budgets count input PNG bytes only and are given back
+once a page is mapped, so finished `PageDocument`s (text, tables, inline
+picture crops) wait in server memory for as long as the client does not
+read them. A client must read events concurrently with uploading pages;
+one that uploads a whole document first makes the server hold the whole
+converted document. Bounding output (for example, a page keeps its
+stream lease until the writer hands its event to `Write`, so an unread
+stream stops admitting pages) is the follow-up once gRParse reads
+concurrently; done before that, it would deadlock gRParse, which writes
+every page before reading any response.
+
+Every VLM call also takes one of the server's `GRPC_VLM_MAX_INFLIGHT`
+slots, so many streams cannot pile requests onto an endpoint that
+serves one at a time.
 
 A stream halts once nobody will receive its answers: the client
 cancelled or its deadline passed, the consumer stopped taking events, a

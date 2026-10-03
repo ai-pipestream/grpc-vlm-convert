@@ -60,7 +60,7 @@ Configuration is entirely `GRPC_VLM_*` environment variables:
 | `GRPC_VLM_MAX_INFLIGHT` | `8` | VLM calls in flight across every stream: the endpoint's capacity is per server, not per stream. A call past it waits here, its timeout not yet running |
 | `GRPC_VLM_MAX_PAGE_BYTES` | `33554432` | Per-page PNG cap (`RESOURCE_EXHAUSTED`) |
 | `GRPC_VLM_MAX_PAGES` | `512` | Per-stream page cap (`RESOURCE_EXHAUSTED`) |
-| `GRPC_VLM_MAX_STREAM_BUFFERED_BYTES` | 4 × `GRPC_VLM_MAX_PAGE_BYTES` | Bytes of page images one stream may hold read but not yet answered (queued or in flight). At the cap the server stops reading that stream, so gRPC flow control holds the client back. At least `GRPC_VLM_MAX_PAGE_BYTES` |
+| `GRPC_VLM_MAX_STREAM_BUFFERED_BYTES` | 4 × `GRPC_VLM_MAX_PAGE_BYTES` | Bytes of page images one stream may hold read but not yet answered (queued or in flight). At the cap the server stops reading that stream, so gRPC flow control holds the client back. At least `GRPC_VLM_MAX_PAGE_BYTES`. Converted pages the client has not read yet are not counted and not bounded: read events while uploading (see `docs/design.md`) |
 | `GRPC_VLM_MAX_BUFFERED_BYTES` | 16 × `GRPC_VLM_MAX_PAGE_BYTES` | The same bound across every stream on both transports. At least `GRPC_VLM_MAX_PAGE_BYTES` |
 | `GRPC_VLM_VLM_TIMEOUT_SECONDS` | `300` | Wall-clock budget for one page's whole VLM call: every attempt and every retry backoff spend from it, and an endpoint that drips bytes cannot stretch it. A cancelled stream or an expired client deadline ends the call sooner, mid-attempt included |
 | `GRPC_VLM_METRICS_INTERVAL_SECONDS` | `60` | Stdout metrics line interval, 0 disables |
