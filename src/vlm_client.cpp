@@ -5,9 +5,12 @@
 #include <cctype>
 #include <charconv>
 #include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include <string_view>
 #include <system_error>
 #include <thread>
+#include <utility>
 
 #include <httplib.h>
 #include <nlohmann/json.hpp>
@@ -32,6 +35,125 @@ bool retryable_status(int status) {
 bool retryable_transport(httplib::Error error) {
     return error == httplib::Error::Connection || error == httplib::Error::ConnectionTimeout;
 }
+
+// How often the watchdog asks the caller's probe whether it still wants
+// the answer, and how often it re-stops an attempt after the call trips.
+constexpr auto kWatchInterval = std::chrono::milliseconds(50);
+// httplib connects while holding the lock Client::stop() needs, so a
+// cancel cannot interrupt a connect: cap it well below the call budget.
+constexpr auto kConnectTimeout = std::chrono::seconds(10);
+// How far past the budget httplib's own timeouts sit, so the budget is
+// what ends an attempt and they only back it up.
+constexpr auto kTimeoutSlack = std::chrono::milliseconds(200);
+
+// Cuts one call short from outside: the caller's cancel probe and the
+// call's own wall-clock budget, which spans every attempt and backoff.
+// httplib's read timeout bounds each recv rather than the response, and
+// its progress hooks fire only while bytes move, so neither ends an
+// attempt parked on a model that has not answered yet, or a caller that
+// has gone away. A watchdog thread does: the moment the call trips it
+// shuts the in-flight socket down (Client::stop), which fails the blocked
+// attempt at once, and it repeats that every interval so an attempt that
+// raced past the last check is stopped too.
+class CallGuard {
+  public:
+    CallGuard(std::function<bool()> cancelled, std::chrono::steady_clock::time_point deadline)
+        : cancelled_(std::move(cancelled)), deadline_(deadline), thread_([this] { watch(); }) {}
+
+    ~CallGuard() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            done_ = true;
+        }
+        wake_.notify_all();
+        thread_.join();
+    }
+
+    CallGuard(const CallGuard&) = delete;
+    CallGuard& operator=(const CallGuard&) = delete;
+
+    // True once the budget is spent or the caller stopped wanting the
+    // answer; sticky.
+    bool tripped() {
+        if (tripped_.load()) {
+            return true;
+        }
+        if (cancelled_ && cancelled_()) {
+            by_caller_ = true;
+            tripped_ = true;
+        } else if (std::chrono::steady_clock::now() >= deadline_) {
+            tripped_ = true;
+        }
+        return tripped_.load();
+    }
+
+    // True when the trip came from the caller rather than the budget.
+    bool by_caller() const { return by_caller_.load(); }
+
+    // What is left of the budget, never negative.
+    std::chrono::milliseconds remaining() const {
+        const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline_ - std::chrono::steady_clock::now());
+        return std::max(left, std::chrono::milliseconds(0));
+    }
+
+    // Registers the attempt in flight (nullptr once it returns). False
+    // when the call already tripped: that attempt must not start, and it
+    // is not registered (its client is about to be destroyed).
+    bool watch(httplib::Client* client) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (client != nullptr && tripped()) {
+            client_ = nullptr;
+            return false;
+        }
+        client_ = client;
+        return true;
+    }
+
+    // A backoff sleep that ends early when the call trips; false then.
+    bool sleep_for(std::chrono::milliseconds delay) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        wake_.wait_for(lock, delay, [&] { return tripped(); });
+        return !tripped();
+    }
+
+  private:
+    void watch() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        while (!done_) {
+            const bool was_tripped = tripped_.load();
+            if (tripped()) {
+                if (!was_tripped) {
+                    wake_.notify_all();  // ends a backoff sleep at once
+                }
+                if (client_ != nullptr) {
+                    client_->stop();
+                }
+            }
+            const auto now = std::chrono::steady_clock::now();
+            std::chrono::steady_clock::time_point next;
+            if (tripped_.load()) {
+                next = now + kWatchInterval;  // keep stopping a racing attempt
+            } else if (cancelled_) {
+                next = std::min(deadline_, now + kWatchInterval);  // poll the probe
+            } else {
+                next = deadline_;  // nothing else can trip the call
+            }
+            wake_.wait_until(lock, next);
+        }
+    }
+
+    std::function<bool()> cancelled_;
+    const std::chrono::steady_clock::time_point deadline_;
+    std::atomic<bool> tripped_{false};
+    std::atomic<bool> by_caller_{false};
+    std::mutex mutex_;
+    std::condition_variable wake_;
+    httplib::Client* client_ = nullptr;
+    bool done_ = false;
+    // Last: the watchdog starts once everything above is initialized.
+    std::thread thread_;
+};
 
 std::string base64_encode(const std::string& bytes) {
     static const char kAlphabet[] =
@@ -187,48 +309,92 @@ VlmResult generate(const VlmCall& call) {
         return result;
     }
 
-    nlohmann::json body = {
-        {"model", call.model},
-        {"messages",
-         {{{"role", "user"},
-           {"content",
-            {{{"type", "text"}, {"text", call.prompt}},
-             {{"type", "image_url"},
-              {"image_url", {{"url", "data:image/png;base64," + base64_encode(call.png)}}}}}}}}},
-        {"max_tokens", call.max_tokens},
-        {"logprobs", true},
-    };
-    if (!call.stop.empty()) {
-        body["stop"] = call.stop;
-    }
-    // One key buys the alternates the model weighed per token; asking for
-    // none is the default, so the parameter is omitted rather than zeroed.
-    if (call.top_logprobs > 0) {
-        body["top_logprobs"] = call.top_logprobs;
+    // A caller that already left gets nothing sent on its behalf.
+    if (call.cancelled && call.cancelled()) {
+        result.cancelled = true;
+        result.error = "VLM call cancelled before it started";
+        return result;
     }
 
-    const std::string payload = body.dump();
+    std::string payload;
+    {
+        // The request DOM holds a base64 copy of the page; it is freed
+        // before the call, so only the serialized payload waits on the
+        // endpoint.
+        nlohmann::json body = {
+            {"model", call.model},
+            {"messages",
+             {{{"role", "user"},
+               {"content",
+                {{{"type", "text"}, {"text", call.prompt}},
+                 {{"type", "image_url"},
+                  {"image_url",
+                   {{"url", "data:image/png;base64," + base64_encode(call.png)}}}}}}}}},
+            {"max_tokens", call.max_tokens},
+            {"logprobs", true},
+        };
+        if (!call.stop.empty()) {
+            body["stop"] = call.stop;
+        }
+        // One key buys the alternates the model weighed per token; asking
+        // for none is the default, so the parameter is omitted rather than
+        // zeroed.
+        if (call.top_logprobs > 0) {
+            body["top_logprobs"] = call.top_logprobs;
+        }
+        payload = body.dump();
+    }
     httplib::Headers headers;
     if (!call.api_key.empty()) {
         headers.emplace("Authorization", "Bearer " + call.api_key.reveal());
     }
+
+    // One budget for the whole call: every attempt and every backoff sleep
+    // spend from it, and the caller's probe can end it at any point.
+    CallGuard guard(call.cancelled, std::chrono::steady_clock::now() +
+                                        std::chrono::seconds(std::max(call.timeout_seconds, 0L)));
     httplib::Result response;
     int retries = 0;
-    for (;;) {
-        // A fresh client per attempt: after a connect-level failure the
-        // previous one's socket state is useless anyway.
-        httplib::Client client(where.origin);
-        if (!client.is_valid()) {
-            // parse_endpoint refuses what httplib cannot take apart, so this
-            // is a backstop: a client that did not construct must never be
-            // used (its calls dereference null).
-            result.error = "endpoint is not usable: " + where.origin;
-            return result;
+    while (!guard.tripped()) {
+        {
+            // A fresh client per attempt: after a connect-level failure the
+            // previous one's socket state is useless anyway.
+            httplib::Client client(where.origin);
+            if (!client.is_valid()) {
+                // parse_endpoint refuses what httplib cannot take apart, so
+                // this is a backstop: a client that did not construct must
+                // never be used (its calls dereference null).
+                result.error = "endpoint is not usable: " + where.origin;
+                return result;
+            }
+            // httplib's own timeouts sit just past what is left of the
+            // budget: the budget (the watchdog) ends the attempt, and they
+            // are the backstop. max_timeout bounds the whole response read,
+            // so an endpoint dripping a byte at a time cannot stretch an
+            // attempt even then.
+            const std::chrono::milliseconds limit = guard.remaining() + kTimeoutSlack;
+            client.set_connection_timeout(
+                std::min<std::chrono::milliseconds>(limit, kConnectTimeout));
+            client.set_read_timeout(limit);
+            client.set_write_timeout(limit);
+            client.set_max_timeout(limit);
+            if (!guard.watch(&client)) {
+                break;
+            }
+            // The upload hook stops a large page mid-send; the watchdog
+            // covers the wait for the answer, where no bytes move.
+            response = client.Post(where.target, headers, payload, "application/json",
+                                   [&guard](size_t, size_t) { return !guard.tripped(); });
+            guard.watch(nullptr);
         }
-        client.set_connection_timeout(call.timeout_seconds, 0);
-        client.set_read_timeout(call.timeout_seconds, 0);
-        client.set_write_timeout(call.timeout_seconds, 0);
-        response = client.Post(where.target, headers, payload, "application/json");
+        // An answer that made it in is used even if the budget ran out
+        // while it arrived.
+        if (response && response->status == 200) {
+            break;
+        }
+        if (guard.tripped()) {
+            break;
+        }
         const bool retryable = response ? retryable_status(response->status)
                                         : retryable_transport(response.error());
         if (!retryable || retries == kMaxRetries) {
@@ -238,9 +404,22 @@ VlmResult generate(const VlmCall& call) {
         // Exponential backoff like urllib3: base * 2^(retries-1) —
         // 0.1s, 0.2s, 0.4s, ... at the default base.
         const long delay_ms = g_backoff_base_ms.load() << (retries - 1);
-        if (delay_ms > 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+        if (delay_ms > 0 && !guard.sleep_for(std::chrono::milliseconds(delay_ms))) {
+            break;
         }
+    }
+    if (!(response && response->status == 200) && guard.tripped()) {
+        if (guard.by_caller()) {
+            result.cancelled = true;
+            result.error = "VLM call cancelled";
+        } else {
+            result.error = "VLM call exceeded its " + std::to_string(call.timeout_seconds) +
+                           " s budget";
+            if (retries > 0) {
+                result.error += " after " + std::to_string(retries + 1) + " attempts";
+            }
+        }
+        return result;
     }
     if (!response) {
         result.error = "endpoint unreachable: " + where.origin;

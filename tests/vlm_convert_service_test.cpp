@@ -7,7 +7,9 @@
 #include <grpcpp/grpcpp.h>
 
 #include <atomic>
+#include <chrono>
 #include <cmath>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -70,6 +72,11 @@ struct FakeVlm {
     nlohmann::json last_body;
     // The Authorization header of the most recent request ("" when absent).
     std::string last_authorization;
+    // HOLD pages: how many are parked now, whether they may go, and how
+    // many saw their caller hang up while parked.
+    std::atomic<int> holding{0};
+    std::atomic<bool> hold_released{false};
+    std::atomic<long> held_disconnects{0};
 
     nlohmann::json last_request() {
         std::lock_guard<std::mutex> lock(mutex);
@@ -96,6 +103,18 @@ struct FakeVlm {
             require(url.starts_with(prefix), "image arrives as a data URL");
             const std::string png = base64_decode(url.substr(prefix.size()));
 
+            if (png.contains("HOLD")) {
+                // Parks like a model still generating, until released or
+                // until the caller hangs up (which it records).
+                holding++;
+                while (!hold_released.load() && !request.is_connection_closed()) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                }
+                if (!hold_released.load()) {
+                    held_disconnects++;
+                }
+                holding--;
+            }
             if (png.contains("FAIL")) {
                 response.status = 503;
                 response.set_content("{\"error\":\"model overloaded\"}", "application/json");
@@ -141,12 +160,23 @@ struct FakeVlm {
     }
 
     void stop() {
+        hold_released = true;  // never park a held page on the teardown path
         server.stop();
         thread.join();
     }
 
     std::string endpoint() const { return "http://127.0.0.1:" + std::to_string(port); }
 };
+
+bool wait_until(const std::function<bool()>& condition) {
+    for (int i = 0; i < 300; i++) {  // 3 s budget, ms-scale in practice
+        if (condition()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return false;
+}
 
 struct Collected {
     std::vector<uint32_t> started;
@@ -563,6 +593,44 @@ void verify_api_key_and_overrides(FakeVlm* fake) {
     }
 }
 
+// A client that cancels (or whose deadline passes) while its page is still
+// in the model gets the VLM call cut: the endpoint sees the hang-up and the
+// RPC thread is released, instead of waiting out the call and its retries.
+void verify_cancel_reaches_inflight_call(FakeVlm* fake) {
+    vlm::Config config;
+    config.endpoint = fake->endpoint();
+    config.concurrency = 1;
+    config.vlm_timeout_seconds = 60;
+    TestServer server(config);
+    fake->hold_released = false;
+    const long disconnects_before = fake->held_disconnects.load();
+
+    auto stub = vlmv1::VlmConvertService::NewStub(server.channel);
+    grpc::ClientContext context;
+    auto stream = stub->ConvertPages(&context);
+    vlmv1::ConvertPagesRequest request;
+    *request.mutable_options() = vlmv1::ConvertOptions();
+    stream->Write(request);
+    request.Clear();
+    *request.mutable_page_image() = page(1, "HOLD-1");
+    stream->Write(request);
+    const bool parked = wait_until([&] { return fake->holding.load() > 0; });
+
+    context.TryCancel();
+    vlmv1::ConvertPagesResponse event;
+    while (stream->Read(&event)) {
+    }
+    const grpc::Status status = stream->Finish();
+    const bool cut = wait_until([&] { return fake->held_disconnects.load() > disconnects_before; });
+    // Release before any assertion can throw, so a failure never leaves
+    // the server waiting on a parked page.
+    fake->hold_released = true;
+    require(parked, "the page reached the model");
+    require(status.error_code() == grpc::StatusCode::CANCELLED, "the stream is cancelled");
+    require(cut, "the cancel reached the VLM call in flight");
+    server.stop();
+}
+
 void verify_no_endpoint() {
     vlm::Config config;
     config.endpoint = "";
@@ -659,6 +727,7 @@ int main() {
         verify_abort_on_error(server.channel);
         verify_error_matrix(server.channel);
         verify_api_key_and_overrides(&fake);
+        verify_cancel_reaches_inflight_call(&fake);
         verify_no_endpoint();
         verify_page_byte_cap();
         verify_service_info(server.channel, fake.endpoint());

@@ -36,7 +36,8 @@ struct Config {
     size_t concurrency = 2;
     size_t max_page_bytes = 32ULL * 1024 * 1024;
     size_t max_pages = 512;
-    // Deadline for one page's HTTP call to the VLM.
+    // Wall-clock budget for one page's VLM call, every attempt and retry
+    // backoff included.
     size_t vlm_timeout_seconds = 300;
     // 0 disables the stdout metrics line.
     size_t metrics_interval_seconds = 60;

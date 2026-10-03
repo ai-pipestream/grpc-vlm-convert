@@ -5,7 +5,10 @@
 // attempt counts are the assertions, not the wall-clock delays.
 
 #include <atomic>
+#include <chrono>
 #include <cmath>
+#include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -38,6 +41,8 @@ struct ScriptableVlm {
     // The request target (path and query) of the last call, as it arrived.
     std::mutex target_mutex;
     std::string last_target;
+    // Set when a parked /hang call saw its caller hang up.
+    std::atomic<bool> hang_saw_disconnect{false};
 
     std::string target() {
         std::lock_guard<std::mutex> lock(target_mutex);
@@ -102,6 +107,47 @@ struct ScriptableVlm {
         server.Post("/v1/chat/completions", handler);
         server.Post("/base/v1/chat/completions", handler);
         server.Post("/gw/v1/chat/completions", handler);
+
+        // A slow drip: one byte every 100 ms keeps every socket read alive,
+        // so only a whole-call budget ends the call.
+        server.Post("/drip/v1/chat/completions",
+                    [](const httplib::Request&, httplib::Response& response) {
+                        auto started = std::make_shared<std::chrono::steady_clock::time_point>(
+                            std::chrono::steady_clock::now());
+                        response.set_chunked_content_provider(
+                            "application/json", [started](size_t, httplib::DataSink& sink) {
+                                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                                if (std::chrono::steady_clock::now() - *started >
+                                    std::chrono::seconds(20)) {
+                                    sink.done();
+                                    return true;
+                                }
+                                return sink.write(" ", 1);
+                            });
+                    });
+        // A model that never answers: the handler parks until the caller
+        // hangs up, and records that it saw the connection close.
+        server.Post("/hang/v1/chat/completions",
+                    [this](const httplib::Request& request, httplib::Response& response) {
+                        attempts++;
+                        const auto started = std::chrono::steady_clock::now();
+                        while (!request.is_connection_closed() &&
+                               std::chrono::steady_clock::now() - started <
+                                   std::chrono::seconds(20)) {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                        }
+                        if (request.is_connection_closed()) {
+                            hang_saw_disconnect = true;
+                        }
+                        response.status = 503;
+                    });
+        // A busy model: 400 ms per attempt, then 503 (retryable).
+        server.Post("/slow503/v1/chat/completions",
+                    [this](const httplib::Request&, httplib::Response& response) {
+                        attempts++;
+                        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+                        response.status = 503;
+                    });
         port = server.bind_to_any_port("127.0.0.1");
         require(port > 0, "fake VLM bound");
         thread = std::thread([this] { server.listen_after_bind(); });
@@ -124,6 +170,93 @@ vlm::VlmCall call_to(const std::string& endpoint) {
             .max_tokens = 4096,
             .png = "fake-png-bytes",
             .timeout_seconds = 5};
+}
+
+bool wait_until(const std::function<bool()>& condition) {
+    for (int i = 0; i < 300; i++) {  // 3 s budget, ms-scale in practice
+        if (condition()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return false;
+}
+
+std::chrono::milliseconds elapsed_since(std::chrono::steady_clock::time_point started) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started);
+}
+
+// The timeout is a budget for the whole call and the caller's probe ends
+// it at any point: mid-wait on a model that has not answered, mid-drip,
+// between retries, or before anything is sent.
+void verify_budget_and_cancellation(ScriptableVlm& fake) {
+    {
+        vlm::VlmCall drip = call_to(fake.endpoint() + "/drip");
+        drip.timeout_seconds = 1;
+        const auto started = std::chrono::steady_clock::now();
+        const vlm::VlmResult dripped = vlm::generate(drip);
+        require(!dripped.ok && dripped.error.contains("budget"),
+                "a dripping endpoint fails on the budget: " + dripped.error);
+        require(elapsed_since(started) < std::chrono::seconds(4),
+                "a byte every 100 ms does not stretch the call past its budget");
+    }
+    {
+        fake.attempts = 0;
+        vlm::VlmCall slow = call_to(fake.endpoint() + "/slow503");
+        slow.timeout_seconds = 1;
+        const auto started = std::chrono::steady_clock::now();
+        const vlm::VlmResult spent = vlm::generate(slow);
+        require(!spent.ok && spent.error.contains("budget"),
+                "retries end when the budget does: " + spent.error);
+        require(fake.attempts.load() < 6, "the budget, not the retry count, ended the call");
+        require(elapsed_since(started) < std::chrono::milliseconds(2500),
+                "retries and backoff spend from one budget");
+    }
+    {
+        // Parked on a model that has not answered: no bytes move, so only
+        // the watchdog can end it, and the endpoint sees the hang-up.
+        fake.hang_saw_disconnect = false;
+        std::atomic<bool> leave{false};
+        vlm::VlmCall hung = call_to(fake.endpoint() + "/hang");
+        hung.timeout_seconds = 30;
+        hung.cancelled = [&leave] { return leave.load(); };
+        std::jthread timer([&leave] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            leave = true;
+        });
+        const auto started = std::chrono::steady_clock::now();
+        const vlm::VlmResult cut = vlm::generate(hung);
+        require(!cut.ok && cut.cancelled, "a cancelled call says so: " + cut.error);
+        require(elapsed_since(started) < std::chrono::seconds(3),
+                "the cancel reaches an attempt parked on the model");
+        require(wait_until([&] { return fake.hang_saw_disconnect.load(); }),
+                "the endpoint sees the connection close");
+    }
+    {
+        // Cancelled between attempts: no further attempt is made.
+        fake.attempts = 0;
+        std::atomic<bool> leave{false};
+        vlm::VlmCall busy = call_to(fake.endpoint() + "/slow503");
+        busy.timeout_seconds = 30;
+        busy.cancelled = [&leave] { return leave.load(); };
+        std::jthread timer([&] {
+            wait_until([&] { return fake.attempts.load() >= 1; });
+            leave = true;
+        });
+        const vlm::VlmResult cut = vlm::generate(busy);
+        require(!cut.ok && cut.cancelled, "a cancel between retries ends the call");
+        require(fake.attempts.load() <= 2, "no attempt starts after the cancel");
+    }
+    {
+        // A caller that already left gets nothing sent on its behalf.
+        fake.attempts = 0;
+        vlm::VlmCall gone = call_to(fake.endpoint());
+        gone.cancelled = [] { return true; };
+        const vlm::VlmResult nothing = vlm::generate(gone);
+        require(!nothing.ok && nothing.cancelled, "an already-cancelled call is cancelled");
+        require(fake.attempts.load() == 0, "nothing reaches the endpoint");
+    }
 }
 
 }  // namespace
@@ -321,6 +454,8 @@ int main() {
         require(!failed.ok, "connection refused fails");
         require(failed.error.contains("unreachable"),
                 "connection failure surfaces as unreachable");
+
+        verify_budget_and_cancellation(fake);
     } catch (const std::exception& error) {
         std::println(stderr, "{}", error.what());
         fake.stop();

@@ -1,6 +1,7 @@
 #include "vlm_convert_service.h"
 
 #include <algorithm>
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <mutex>
@@ -51,12 +52,31 @@ class Channel {
         return true;
     }
 
+    enum class Popped { kValue, kClosed, kTimeout };
+
+    // pop() that gives up after `timeout`, so the caller can look around.
+    Popped pop_for(T* value, std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (!ready_.wait_for(lock, timeout, [&] { return closed_ || !queue_.empty(); })) {
+            return Popped::kTimeout;
+        }
+        if (queue_.empty()) {
+            return Popped::kClosed;
+        }
+        *value = std::move(queue_.front());
+        queue_.pop_front();
+        return Popped::kValue;
+    }
+
   private:
     std::mutex mutex_;
     std::condition_variable ready_;
     std::deque<T> queue_;
     bool closed_ = false;
 };
+
+// How often a stream asks its transport whether the client is still there.
+constexpr auto kCancelPollInterval = std::chrono::milliseconds(50);
 
 // The alternates-per-token ceiling OpenAI-compatible endpoints impose.
 // Asking for more is a 400 from the endpoint, so it fails here first,
@@ -163,12 +183,40 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
     std::atomic<uint32_t> started{0};
     std::atomic<uint32_t> ok{0};
     std::atomic<uint32_t> page_failed{0};
+    // Set once nobody wants this stream's answers any more: the client
+    // cancelled, its deadline passed, or the consumer stopped taking
+    // events. Workers then skip queued pages, and every VLM call in flight
+    // is cut short (it is each call's cancel probe).
+    std::atomic<bool> halt{false};
+    std::atomic<bool> client_gone{false};
+    auto halted = [&] { return halt.load(); };
 
     std::thread writer([&] {
+        // The writer is the one thread that asks the transport whether the
+        // client is still there. IsCancelled plucks the call's completion
+        // queue, which tolerates only a handful of concurrent pluckers (a
+        // pluck turned away can fail a real Read), so the workers and the
+        // watchdogs of their VLM calls read `halt` instead.
+        auto next_check = std::chrono::steady_clock::now();
         vlmv1::ConvertPagesResponse event;
-        while (events.pop(&event)) {
-            if (!write(event)) {
-                return;  // consumer gone; producers see the cancelled flag
+        for (;;) {
+            if (cancelled != nullptr && std::chrono::steady_clock::now() >= next_check) {
+                if (cancelled()) {
+                    client_gone = true;
+                    halt = true;
+                    return;
+                }
+                next_check = std::chrono::steady_clock::now() + kCancelPollInterval;
+            }
+            const auto popped = events.pop_for(&event, kCancelPollInterval);
+            if (popped == Channel<vlmv1::ConvertPagesResponse>::Popped::kClosed) {
+                return;
+            }
+            if (popped == Channel<vlmv1::ConvertPagesResponse>::Popped::kValue &&
+                !write(event)) {
+                client_gone = true;  // consumer gone
+                halt = true;
+                return;
             }
         }
     });
@@ -179,7 +227,7 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
         workers.emplace_back([&] {
             PageJob job;
             while (jobs.pop(&job)) {
-                if (is_cancelled()) {
+                if (halted()) {
                     continue;
                 }
                 vlmv1::ConvertPagesResponse event;
@@ -194,7 +242,11 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
                 // The raster then moves into the call rather than riding
                 // the queue twice (once on the image, once on the call).
                 job.call.png = std::move(*job.image.mutable_png());
+                job.call.cancelled = halted;
                 VlmResult result = generate(job.call);
+                if (result.cancelled) {
+                    continue;  // cut short because nobody is waiting for it
+                }
                 if (result.has_logprobs) {
                     // The response's mean token log-probability is a
                     // page-wide statistic. It rides the source as the raw
@@ -273,7 +325,7 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
     // events reach the client while later pages are still uploading.
     grpc::Status status = grpc::Status::OK;
     bool saw_input = false;
-    while (read(&request)) {
+    while (!halted() && read(&request)) {
         if (request.has_options()) {
             status = client_error(grpc::StatusCode::INVALID_ARGUMENT,
                                   "ConvertOptions must not repeat on the stream");
@@ -348,7 +400,7 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
     if (!status.ok()) {
         return status;
     }
-    if (is_cancelled()) {
+    if (client_gone.load() || is_cancelled()) {
         return grpc::Status(grpc::StatusCode::CANCELLED, "client cancelled the stream");
     }
     if (!saw_input) {

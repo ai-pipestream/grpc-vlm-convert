@@ -247,8 +247,15 @@ exponential backoff (100 ms base: 0.1 s, 0.2 s, 0.4 s, ...) on HTTP
 refused while the VLM server starts). Other statuses, and 200s that do
 not parse, fail without a retry, so a persistently failing page
 surfaces as a failed `PageRaw` after 6 attempts total. The configured
-timeout applies per attempt (worst case 6 × timeout); tests pin the
-backoff base to zero via `set_retry_backoff_base_ms`.
+timeout (`GRPC_VLM_VLM_TIMEOUT_SECONDS`) is one wall-clock budget for
+the whole call: attempts and backoff sleeps all spend from it, and an
+endpoint that drips a byte at a time cannot stretch it (httplib's
+per-read timeout alone would let it). Cancellation reaches the call
+too: when the client cancels or its deadline passes, the stream notices
+within 50 ms, and a watchdog per call shuts the in-flight socket down
+(httplib `Client::stop`), mid-wait on the model included; no retry
+follows and the page emits nothing. Tests pin the backoff base to zero
+via `set_retry_backoff_base_ms`.
 
 ## 5. Presets vs endpoints
 
