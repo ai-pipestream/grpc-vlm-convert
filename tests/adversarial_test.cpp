@@ -634,6 +634,63 @@ void verify_picture_crop_budget() {
             "one page-wide warning counts the skipped images");
 }
 
+// The data URIs a page carries are capped in bytes, so a page of large
+// crops cannot outgrow a client's message limit: the crop that would cross
+// the cap is dropped, and so is every later one, however small.
+void verify_picture_inline_byte_cap() {
+    const std::string gray = base64_decode(kGray4x3);
+    docv1::ImageRef image;
+    require(vlm::mapping::crop_png_image(gray, 0, 0, 4, 3, 4, 3, &image),
+            "the full-page crop attaches under the default cap");
+    const size_t full_page = image.uri().size();
+    const size_t cap = full_page + full_page / 2;  // one full-page crop fits, two do not
+    {
+        vlm::mapping::PageRaster raster(gray, 4, 3, {.max_inline_bytes = cap});
+        require(raster.crop(0, 0, 4, 3, &image) == vlm::mapping::PageRaster::Crop::kAttached,
+                "a crop within the byte cap attaches");
+        image.Clear();
+        require(raster.crop(0, 0, 4, 3, &image) ==
+                    vlm::mapping::PageRaster::Crop::kOverByteCap,
+                "a crop that would cross the byte cap is refused");
+        require(!image.has_size() && image.uri().empty(), "a refused crop leaves image untouched");
+        require(raster.crop(0, 0, 1, 1, &image) ==
+                    vlm::mapping::PageRaster::Crop::kOverByteCap,
+                "every later crop is refused too, however small");
+        require(raster.inline_bytes() == full_page, "only the attached crop is counted");
+    }
+    {
+        vlm::mapping::PageRaster raster(gray, 4, 3, {.max_inline_bytes = full_page});
+        require(raster.crop(0, 0, 4, 3, &image) == vlm::mapping::PageRaster::Crop::kAttached,
+                "a crop exactly at the byte cap attaches");
+    }
+
+    // Through the mapper: the cap comes from the page context, every
+    // PictureItem is kept, and one warning names the byte cap.
+    vlm::mapping::PageContext page = page_context();
+    page.width = 4;
+    page.height = 3;
+    page.png = gray;
+    page.crops.max_inline_bytes = cap;
+    const std::string picture = "<picture><loc_0><loc_0><loc_500><loc_500></picture>";
+    docv1::Document doc;
+    std::string error;
+    std::vector<vlmv1::PageWarning> warnings;
+    require(vlm::mapping::map_doctags("<doctag>" + picture + picture + picture + "</doctag>",
+                                      page, &doc, &error, &warnings),
+            "pictures past the byte cap map: " + error);
+    require(doc.pictures_size() == 3, "every picture is kept");
+    require(doc.pictures(0).has_image() && !doc.pictures(1).has_image() &&
+                !doc.pictures(2).has_image(),
+            "only the first picture fits the byte cap");
+    require(warnings.size() == 1 &&
+                warnings[0].code() == vlmv1::PAGE_WARNING_CODE_PICTURE_IMAGES_SKIPPED &&
+                warnings[0].message().starts_with("2 picture(s)") &&
+                warnings[0].message().contains(std::to_string(cap) + " bytes") &&
+                warnings[0].ref().empty(),
+            "one page-wide warning names the byte cap: " +
+                (warnings.empty() ? std::string() : warnings[0].message()));
+}
+
 // A raster whose header claims more pixels than the decode cap is never
 // decoded: the picture is kept without an image and the page says why.
 void verify_raster_pixel_cap() {
@@ -1304,6 +1361,7 @@ int main() {
     run("table_grid_budget", verify_table_grid_budget);
     run("image_crop_adversarial", verify_image_crop_adversarial);
     run("picture_crop_budget", verify_picture_crop_budget);
+    run("picture_inline_byte_cap", verify_picture_inline_byte_cap);
     run("raster_pixel_cap", verify_raster_pixel_cap);
     run("markdown_adversarial", verify_markdown_adversarial);
     run("html_adversarial", verify_html_adversarial);

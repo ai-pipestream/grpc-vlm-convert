@@ -119,6 +119,10 @@ PageRaster::Crop PageRaster::crop(double left, double top, double right, double 
         return Crop::kFailed;
     }
 
+    if (inline_bytes_spent_) {
+        return Crop::kOverByteCap;
+    }
+
     const int crop_w = x2 - x1;
     const int crop_h = y2 - y1;
     const uint64_t area = static_cast<uint64_t>(crop_w) * static_cast<uint64_t>(crop_h);
@@ -145,13 +149,21 @@ PageRaster::Crop PageRaster::crop(double left, double top, double right, double 
         return Crop::kFailed;
     }
 
+    std::string uri = "data:image/png;base64," +
+                      base64_encode(reinterpret_cast<const unsigned char*>(sink.bytes.data()),
+                                    sink.bytes.size());
+    // Subtraction, not addition: inline_bytes_ never exceeds the cap.
+    if (uri.size() > budget_.max_inline_bytes - inline_bytes_) {
+        inline_bytes_spent_ = true;
+        return Crop::kOverByteCap;
+    }
+    inline_bytes_ += uri.size();
+
     image->set_mimetype("image/png");
     image->set_dpi(72);  // docling's ImageRef.from_pil default
     image->mutable_size()->set_width(crop_w);
     image->mutable_size()->set_height(crop_h);
-    image->set_uri("data:image/png;base64," +
-                   base64_encode(reinterpret_cast<const unsigned char*>(sink.bytes.data()),
-                                 sink.bytes.size()));
+    image->set_uri(std::move(uri));
     return Crop::kAttached;
 }
 

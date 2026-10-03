@@ -26,6 +26,7 @@ struct PageState {
     PageRaster raster;
     std::vector<vlmv1::PageWarning>* warnings = nullptr;
     size_t crops_over_budget = 0;
+    size_t crops_over_bytes = 0;
     size_t crops_too_large = 0;
 };
 
@@ -419,6 +420,9 @@ bool emit_picture(const Element& element, const PageContext& page, docv1::Docume
             case PageRaster::Crop::kOverBudget:
                 state.crops_over_budget++;
                 break;
+            case PageRaster::Crop::kOverByteCap:
+                state.crops_over_bytes++;
+                break;
             case PageRaster::Crop::kRasterTooLarge:
                 state.crops_too_large++;
                 break;
@@ -780,7 +784,7 @@ bool map_doctags(const std::string& text, const PageContext& page, docv1::Docume
         return false;
     }
 
-    PageState state{PageRaster(page.png, page.width, page.height), warnings};
+    PageState state{PageRaster(page.png, page.width, page.height, page.crops), warnings};
     size_t items = 0;
     Element current;
     bool element_open = false;
@@ -937,13 +941,21 @@ bool map_doctags(const std::string& text, const PageContext& page, docv1::Docume
         return false;
     }
     if (state.crops_over_budget > 0) {
-        const CropBudget budget;
+        const CropBudget& budget = page.crops;
         add_warning(warnings, vlmv1::PAGE_WARNING_CODE_PICTURE_IMAGES_SKIPPED,
                     std::to_string(state.crops_over_budget) +
                         " picture(s) carry no image: the page's crop budget (" +
                         std::to_string(budget.max_crops) + " crops, " +
                         std::to_string(static_cast<int>(budget.max_area_pages)) +
                         "x the page's pixels) ran out",
+                    "");
+    }
+    if (state.crops_over_bytes > 0) {
+        add_warning(warnings, vlmv1::PAGE_WARNING_CODE_PICTURE_IMAGES_SKIPPED,
+                    std::to_string(state.crops_over_bytes) +
+                        " picture(s) carry no image: the page's inline image cap (" +
+                        std::to_string(page.crops.max_inline_bytes) + " bytes, " +
+                        std::to_string(state.raster.inline_bytes()) + " attached) ran out",
                     "");
     }
     if (state.crops_too_large > 0) {

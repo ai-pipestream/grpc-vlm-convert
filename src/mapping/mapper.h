@@ -5,6 +5,7 @@
 
 #include "ai/pipestream/document/v1/document.pb.h"
 #include "ai/pipestream/vlm/v1/vlm_convert.pb.h"
+#include "image_crop.h"
 
 namespace vlm::mapping {
 
@@ -22,6 +23,9 @@ struct PageContext {
     // crops picture regions out of it for ImageRef attachments. Empty for
     // mappers/tests that have no image.
     std::string png;
+    // What the DocTags mapper may spend cropping pictures out of `png`;
+    // the service sets the inline byte cap from GRPC_VLM_MAX_PAGE_CROP_BYTES.
+    CropBudget crops;
     // Collector attribution stamped on every item ("vlm-convert", the
     // model name, this server's version, and the page's raw model score
     // when the endpoint reported logprobs).

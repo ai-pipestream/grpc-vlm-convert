@@ -8,6 +8,7 @@
 
 #include "config.h"
 #include "fixture.h"
+#include "mapping/image_crop.h"
 
 namespace {
 
@@ -21,6 +22,7 @@ constexpr const char* kAllVars[] = {
     "GRPC_VLM_MAX_STREAM_BUFFERED_BYTES", "GRPC_VLM_MAX_BUFFERED_BYTES",
     "GRPC_VLM_HTTP_HOST",            "GRPC_VLM_HTTP_MAX_BODY_BYTES",
     "GRPC_VLM_HTTP_TOKEN",           "GRPC_VLM_LOGPROBS",
+    "GRPC_VLM_MAX_PAGE_CROP_BYTES",
 };
 
 void clear_env() {
@@ -52,6 +54,9 @@ void verify_defaults() {
     require(config.concurrency == 2, "default concurrency");
     require(config.max_page_bytes == 32ULL * 1024 * 1024, "default page byte cap");
     require(config.max_pages == 512, "default page cap");
+    require(config.max_page_crop_bytes == 3ULL * 1024 * 1024 &&
+                config.max_page_crop_bytes == vlm::mapping::kDefaultMaxInlineCropBytes,
+            "default inline crop cap is 3 MiB, the mapper's own default");
     require(config.vlm_timeout_seconds == 300, "default VLM timeout");
     require(config.metrics_interval_seconds == 60, "default metrics interval");
     require(config.http_port == 50059, "default HTTP port");
@@ -182,12 +187,18 @@ void verify_range_validation() {
     require(rejects("GRPC_VLM_MAX_PAGE_BYTES", "1023"), "page bytes below the minimum");
     require(rejects("GRPC_VLM_MAX_PAGES", "100001"), "pages above the maximum");
     require(rejects("GRPC_VLM_VLM_TIMEOUT_SECONDS", "0"), "timeout below the minimum");
+    require(rejects("GRPC_VLM_MAX_PAGE_CROP_BYTES", "0"), "a zero crop byte cap");
+    require(rejects("GRPC_VLM_MAX_PAGE_CROP_BYTES", "1023"), "crop bytes below the minimum");
+    require(rejects("GRPC_VLM_MAX_PAGE_CROP_BYTES", "3MiB"), "a crop byte cap with a unit");
+    require(rejects("GRPC_VLM_MAX_PAGE_CROP_BYTES", "-1"), "a negative crop byte cap");
 
     // Boundary values pass.
     ::setenv("GRPC_VLM_MAX_PAGE_BYTES", "1024", 1);
     ::setenv("GRPC_VLM_METRICS_INTERVAL_SECONDS", "0", 1);
+    ::setenv("GRPC_VLM_MAX_PAGE_CROP_BYTES", "1024", 1);
     const vlm::Config config = vlm::load_config_from_env();
     require(config.max_page_bytes == 1024, "page bytes at the minimum");
+    require(config.max_page_crop_bytes == 1024, "crop bytes at the minimum");
     require(config.metrics_interval_seconds == 0, "metrics interval 0 (disabled) is legal");
     clear_env();
 }

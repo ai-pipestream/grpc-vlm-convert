@@ -119,6 +119,8 @@ Config load_config_from_env() {
     config.max_page_bytes = configured_size("GRPC_VLM_MAX_PAGE_BYTES", config.max_page_bytes,
                                             1024, 1024ULL * 1024 * 1024);
     config.max_pages = configured_size("GRPC_VLM_MAX_PAGES", config.max_pages, 1, 100000);
+    config.max_page_crop_bytes = configured_size(
+        "GRPC_VLM_MAX_PAGE_CROP_BYTES", config.max_page_crop_bytes, 1024, 1024ULL * 1024 * 1024);
     // The buffer caps default to a multiple of the page cap and may not go
     // below it: a page that fits no budget could never be admitted.
     constexpr size_t kMaxBufferedBytes = 1ULL << 40;

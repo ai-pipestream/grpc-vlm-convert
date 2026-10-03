@@ -20,6 +20,11 @@ namespace vlm::mapping {
 // page.
 constexpr uint64_t kMaxRasterPixels = 40'000'000;
 
+// Default for CropBudget::max_inline_bytes: 3 MiB of crops leaves the
+// rest of a PageDocument room under the 4 MiB receive limit gRPC clients
+// default to, so one picture-heavy page cannot fail the client's stream.
+constexpr size_t kDefaultMaxInlineCropBytes = 3ULL * 1024 * 1024;
+
 // What one page may spend on crops: a model repeating <picture> must not
 // multiply the page into its own fragment (each crop is re-encoded and
 // inlined as a data URI).
@@ -28,6 +33,11 @@ struct CropBudget {
     size_t max_crops = 100;
     // Cropped pixels per page, as a multiple of the page raster's pixels.
     double max_area_pages = 2.0;
+    // Bytes of inline images per page, counted as the data URIs that ride
+    // the fragment. A near-full-page crop at 300 DPI alone can come close
+    // to a client's message limit; once a crop would cross this cap, it
+    // and every later crop on the page are skipped.
+    size_t max_inline_bytes = kDefaultMaxInlineCropBytes;
 };
 
 // The page raster picture crops come out of, decoded at most once per
@@ -38,7 +48,8 @@ class PageRaster {
     enum class Crop {
         kAttached,        // `image` holds the crop
         kFailed,          // undecodable raster, empty region, or encode failure
-        kOverBudget,      // the page's CropBudget ran out
+        kOverBudget,      // the page's crop count or area budget ran out
+        kOverByteCap,     // the page's inline byte cap ran out
         kRasterTooLarge,  // the raster is above kMaxRasterPixels
     };
 
@@ -57,6 +68,8 @@ class PageRaster {
 
     // How many times the raster was decoded (0 or 1).
     int decodes() const { return decodes_; }
+    // Bytes of data URIs attached so far.
+    size_t inline_bytes() const { return inline_bytes_; }
     // The raster's size as its header declares it; zero until a crop asked.
     uint32_t width() const { return static_cast<uint32_t>(width_); }
     uint32_t height() const { return static_cast<uint32_t>(height_); }
@@ -78,6 +91,10 @@ class PageRaster {
     int decodes_ = 0;
     size_t crops_ = 0;
     uint64_t cropped_pixels_ = 0;
+    size_t inline_bytes_ = 0;
+    // Set by the first crop that would cross max_inline_bytes: later crops
+    // are skipped without being encoded.
+    bool inline_bytes_spent_ = false;
 };
 
 // One crop from a raster decoded for this call alone, for callers with a

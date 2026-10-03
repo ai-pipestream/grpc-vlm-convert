@@ -267,6 +267,7 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
         // The one copy of the raster: the call reads it in place, and the
         // DocTags mapper crops pictures out of it afterwards.
         page.png = std::move(*job.image.mutable_png());
+        page.crops.max_inline_bytes = config_.max_page_crop_bytes;
         page.source.set_collector("vlm-convert");
         page.source.set_model(job.model);
         page.source.set_version(GRPC_VLM_VERSION);

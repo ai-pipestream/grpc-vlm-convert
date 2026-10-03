@@ -21,9 +21,11 @@
 
 #include "config.h"
 #include "fixture.h"
+#include "mapping/image_crop.h"
 #include "service/vlm_convert_service.h"
 #include "vlm_client.h"
 
+namespace docv1 = ai::pipestream::document::v1;
 namespace vlmv1 = ai::pipestream::vlm::v1;
 
 namespace {
@@ -59,6 +61,7 @@ std::string base64_decode(const std::string& encoded) {
 //   FAIL    → HTTP 503
 //   MDPAGE  → canned markdown
 //   RAWTEXT → prose without markup (mapping failure for DocTags)
+//   PICTURES → canned DocTags with two full-page pictures
 //   else    → canned DocTags naming the marker
 struct FakeVlm {
     httplib::Server server;
@@ -140,6 +143,12 @@ struct FakeVlm {
                 content = "# Converted Page\n\nA markdown paragraph.\n";
             } else if (png.contains("RAWTEXT")) {
                 content = "just plain words with no markup";
+            } else if (png.contains("PICTURES")) {
+                content =
+                    "<doctag>"
+                    "<picture><loc_0><loc_0><loc_500><loc_500></picture>"
+                    "<picture><loc_0><loc_0><loc_500><loc_500></picture>"
+                    "</doctag>";
             } else if (png.contains("WIDETABLE")) {
                 // A table row past the column cap, as a looping model emits.
                 content = "<doctag><otsl>";
@@ -943,6 +952,41 @@ void verify_page_byte_cap() {
     server.stop();
 }
 
+// The operator's inline crop cap reaches the mapper: a page whose crops
+// would outgrow it keeps its pictures, attaches what fits, and says what
+// it skipped, instead of sending a PageDocument the client cannot receive.
+void verify_page_crop_byte_cap(FakeVlm* fake) {
+    // A real 4x3 grayscale PNG (stb decodes it for the crops) with the
+    // fake's marker after IEND, where decoders stop reading.
+    const std::string gray = base64_decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAQAAAADCAAAAACRn/EaAAAAF0lEQVR4nGNg4BKRY9AwsnFjCIhKyQMADI8C"
+        "lWcdFq8AAAAASUVORK5CYII=");
+    docv1::ImageRef full_page;
+    require(vlm::mapping::crop_png_image(gray, 0, 0, 4, 3, 4, 3, &full_page),
+            "the fixture raster crops");
+    vlm::Config config;
+    config.endpoint = fake->endpoint();
+    config.max_page_crop_bytes = full_page.uri().size();  // one full-page crop fits
+    TestServer server(config);
+    vlmv1::PageImage image;
+    image.set_page_no(1);
+    image.set_png(gray + "PICTURES");
+    image.set_width(4);
+    image.set_height(3);
+    Collected out = convert(server.channel, vlmv1::ConvertOptions(), {image});
+    require(out.status.ok() && out.documents.size() == 1,
+            "the page converts: " + out.status.error_message());
+    const vlmv1::PageDocument& document = out.documents[0];
+    require(document.document().pictures_size() == 2, "both pictures are kept");
+    require(document.document().pictures(0).has_image() &&
+                !document.document().pictures(1).has_image(),
+            "only the crop within the configured cap is attached");
+    require(document.warnings_size() == 1 &&
+                document.warnings(0).code() == vlmv1::PAGE_WARNING_CODE_PICTURE_IMAGES_SKIPPED,
+            "the skipped crop is reported as a typed warning");
+    server.stop();
+}
+
 void verify_service_info(const std::shared_ptr<grpc::Channel>& channel,
                          const std::string& endpoint) {
     auto stub = vlmv1::VlmConvertService::NewStub(channel);
@@ -1025,6 +1069,7 @@ int main() {
         verify_failure_stops_dispatch(&fake);
         verify_no_endpoint();
         verify_page_byte_cap();
+        verify_page_crop_byte_cap(&fake);
         verify_service_info(server.channel, fake.endpoint());
 
         require(server.service->converted.load() > 0, "converted counter moved");
