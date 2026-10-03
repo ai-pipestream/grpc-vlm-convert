@@ -64,11 +64,16 @@ Configuration is entirely `GRPC_VLM_*` environment variables:
 | `GRPC_VLM_VLM_TIMEOUT_SECONDS` | `300` | Wall-clock budget for one page's whole VLM call: every attempt and every retry backoff spend from it, and an endpoint that drips bytes cannot stretch it. A cancelled stream or an expired client deadline ends the call sooner, mid-attempt included |
 | `GRPC_VLM_METRICS_INTERVAL_SECONDS` | `60` | Stdout metrics line interval, 0 disables |
 | `GRPC_VLM_HTTP_PORT` | `50059` | HTTP/JSON front-end port; `0` or empty disables the listener |
+| `GRPC_VLM_HTTP_HOST` | `127.0.0.1` | Address the HTTP front end binds. Any non-loopback host (`0.0.0.0` in a container) requires `GRPC_VLM_HTTP_TOKEN`, or the server refuses to start |
+| `GRPC_VLM_HTTP_TOKEN` | *(empty)* | Bearer token every HTTP convert request must carry (`Authorization: Bearer <token>`); `/healthz` stays open. Wrong or missing is 401, checked before the body is read. Never logged |
+| `GRPC_VLM_HTTP_MAX_BODY_BYTES` | `67108864` | Largest HTTP request body; a larger one is 413 before more than this is read. The front end holds a request several times over (body, JSON, protobuf), so this bounds its memory per request: send big documents over gRPC |
 
 ## HTTP API
 
 Alongside gRPC, the same binary serves an HTTP/JSON front end on
-`GRPC_VLM_HTTP_PORT`. It drives the identical ConvertPages pipeline: the
+`GRPC_VLM_HTTP_HOST`:`GRPC_VLM_HTTP_PORT`, loopback by default (any other
+host needs `GRPC_VLM_HTTP_TOKEN`, sent as `Authorization: Bearer
+<token>`). It drives the identical ConvertPages pipeline: the
 envelope is plain JSON, but every message body is canonical proto3 JSON
 (protobuf `MessageToJsonString` / `JsonStringToMessage`, camelCase field
 names, base64 bytes), never hand-mapped.
@@ -86,8 +91,10 @@ curl -s http://localhost:50059/v1/convert -d '{
 ```
 
 Errors keep the gRPC matrix: 400 on `INVALID_ARGUMENT` (bad JSON, page_no
-0, non-PNG bytes), 403 on `PERMISSION_DENIED` (an endpoint override the
-server does not allow), 413 on `RESOURCE_EXHAUSTED`, 501 on `UNIMPLEMENTED`
+0, non-PNG bytes), 401 on a missing or wrong token, 403 on
+`PERMISSION_DENIED` (an endpoint override the server does not allow), 413
+on `RESOURCE_EXHAUSTED` or a body over `GRPC_VLM_HTTP_MAX_BODY_BYTES`, 501
+on `UNIMPLEMENTED`
 (PDF input), 500 otherwise. The body still carries the events collected
 before the failure plus an `error` object:
 
@@ -107,6 +114,9 @@ curl -sN http://localhost:50059/v1/convert/stream -d '{"options": {}, "pages": [
 # {"pageDocument":{"pageNo":1,"document":{...}}}
 # {"complete":{"pagesStarted":1,"pagesOk":1}}
 ```
+
+A caller that hangs up stops its conversion on either route: queued pages
+are skipped and the VLM call in flight is cut, so nothing more is paid for.
 
 `GET /healthz` returns `200 ok`.
 

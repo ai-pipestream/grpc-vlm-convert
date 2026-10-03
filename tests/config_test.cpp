@@ -19,6 +19,8 @@ constexpr const char* kAllVars[] = {
     "GRPC_VLM_HTTP_PORT",            "GRPC_VLM_API_KEY",
     "GRPC_VLM_ALLOW_ENDPOINT_OVERRIDE", "GRPC_VLM_MAX_INFLIGHT",
     "GRPC_VLM_MAX_STREAM_BUFFERED_BYTES", "GRPC_VLM_MAX_BUFFERED_BYTES",
+    "GRPC_VLM_HTTP_HOST",            "GRPC_VLM_HTTP_MAX_BODY_BYTES",
+    "GRPC_VLM_HTTP_TOKEN",
 };
 
 void clear_env() {
@@ -60,6 +62,36 @@ void verify_defaults() {
             "default stream buffer is four pages at the cap");
     require(config.max_buffered_bytes == 16 * config.max_page_bytes,
             "default process buffer is sixteen pages at the cap");
+    require(config.http_host == "127.0.0.1", "the HTTP front end binds loopback by default");
+    require(config.http_max_body_bytes == 64ULL * 1024 * 1024, "default HTTP body cap");
+    require(config.http_token.empty(), "no default HTTP token");
+}
+
+// Off loopback the HTTP front end needs a token, or the process does not
+// start; the token is read verbatim and never shown.
+void verify_http_exposure() {
+    clear_env();
+    require(rejects("GRPC_VLM_HTTP_HOST", "0.0.0.0"),
+            "binding all interfaces without a token is refused");
+    require(rejects("GRPC_VLM_HTTP_HOST", "10.1.2.3"), "a LAN address without a token is refused");
+    ::setenv("GRPC_VLM_HTTP_HOST", "127.0.0.5", 1);
+    require(vlm::load_config_from_env().http_host == "127.0.0.5",
+            "any 127/8 address is loopback");
+    ::setenv("GRPC_VLM_HTTP_HOST", "0.0.0.0", 1);
+    ::setenv("GRPC_VLM_HTTP_PORT", "0", 1);
+    require(vlm::load_config_from_env().http_port == 0,
+            "with the front end off, its host needs no token");
+    ::unsetenv("GRPC_VLM_HTTP_PORT");
+    ::setenv("GRPC_VLM_HTTP_TOKEN", "http-secret-91", 1);
+    const vlm::Config config = vlm::load_config_from_env();
+    require(config.http_host == "0.0.0.0" && config.http_token.reveal() == "http-secret-91",
+            "with a token, any host is allowed");
+    const std::string banner = vlm::startup_banner(config);
+    require(banner.contains("HTTP on 0.0.0.0:50059, token required"),
+            "the banner names the bind and that a token is required: " + banner);
+    require(!banner.contains("http-secret-91"), "the banner never shows the token");
+    require(rejects("GRPC_VLM_HTTP_MAX_BODY_BYTES", "1000"), "a body cap below 1 KiB is refused");
+    clear_env();
 }
 
 // The buffer caps follow the page cap unless set, and may not go below it:
@@ -207,6 +239,7 @@ int main() {
         verify_endpoint_validation_and_banner();
         verify_credentials_and_override_flag();
         verify_buffer_caps();
+        verify_http_exposure();
         verify_http_port_disable();
     } catch (const std::exception& error) {
         std::println(stderr, "{}", error.what());

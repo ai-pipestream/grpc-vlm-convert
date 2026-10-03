@@ -52,6 +52,26 @@ Secret configured_secret(const char* name) {
     return raw == nullptr ? Secret() : Secret(raw);
 }
 
+// localhost, ::1, or a literal in 127.0.0.0/8: only this machine can
+// connect.
+bool is_loopback_host(const std::string& host) {
+    if (host == "localhost" || host == "::1" || host == "[::1]") {
+        return true;
+    }
+    if (!host.starts_with("127.") || host.size() > 15) {
+        return false;
+    }
+    int dots = 0;
+    for (const char c : host) {
+        if (c == '.') {
+            dots++;
+        } else if (c < '0' || c > '9') {
+            return false;
+        }
+    }
+    return dots == 3 && !host.ends_with('.') && !host.contains("..");
+}
+
 std::vector<std::string> configured_list(const char* name) {
     std::vector<std::string> values;
     const char* raw = std::getenv(name);
@@ -119,13 +139,30 @@ Config load_config_from_env() {
     } else {
         config.http_port = configured_size("GRPC_VLM_HTTP_PORT", config.http_port, 1, 65535);
     }
+    config.http_host = configured_string("GRPC_VLM_HTTP_HOST", config.http_host);
+    config.http_max_body_bytes = configured_size(
+        "GRPC_VLM_HTTP_MAX_BODY_BYTES", config.http_max_body_bytes, 1024, 16ULL << 30);
+    config.http_token = configured_secret("GRPC_VLM_HTTP_TOKEN");
+    // The front end converts pages for whoever reaches it: off loopback,
+    // callers must authenticate.
+    if (config.http_port != 0 && !is_loopback_host(config.http_host) &&
+        config.http_token.empty()) {
+        throw std::invalid_argument(
+            "GRPC_VLM_HTTP_HOST binds the HTTP front end beyond loopback; set "
+            "GRPC_VLM_HTTP_TOKEN so callers must authenticate (or GRPC_VLM_HTTP_PORT=0 to "
+            "turn the front end off)");
+    }
     return config;
 }
 
 std::string startup_banner(const Config& config) {
     std::string banner = "grpc-vlm-convert listening on " + config.listen_address;
     if (config.http_port != 0) {
-        banner += " (HTTP on 0.0.0.0:" + std::to_string(config.http_port) + ")";
+        banner += " (HTTP on " + config.http_host + ":" + std::to_string(config.http_port);
+        if (!config.http_token.empty()) {
+            banner += ", token required";
+        }
+        banner += ")";
     }
     banner += " (endpoint ";
     if (config.endpoint.empty()) {

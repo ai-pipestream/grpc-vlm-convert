@@ -96,6 +96,15 @@ between transports. Message bodies are canonical proto3 JSON
 (`MessageToJsonString` / `JsonStringToMessage`); nlohmann/json touches
 only the `{"options", "pages"}` envelope.
 
+The shim binds `GRPC_VLM_HTTP_HOST`, loopback by default: it converts
+pages, and pays for VLM calls, for whoever reaches it, so any other host
+requires `GRPC_VLM_HTTP_TOKEN` (startup fails without one), checked in a
+pre-routing handler before the body is read. Bodies are capped at the
+transport (`GRPC_VLM_HTTP_MAX_BODY_BYTES`, 413), because a request is
+held several times over before the pipeline's own caps apply. The
+synchronous route passes the connection's liveness as the pipeline's
+`cancelled` probe, so a caller that hangs up halts its stream.
+
 ## 4. Response mapping
 
 | Format | Mapping |

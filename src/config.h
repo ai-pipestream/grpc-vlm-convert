@@ -58,6 +58,20 @@ struct Config {
     // HTTP/JSON front-end port (POST /v1/convert, /v1/convert/stream,
     // GET /healthz). 0 disables the HTTP listener.
     size_t http_port = 50059;
+    // Address the HTTP front end binds (GRPC_VLM_HTTP_HOST). Loopback by
+    // default: it converts pages (paid VLM calls) for whoever reaches it,
+    // so binding anywhere else requires http_token.
+    std::string http_host = "127.0.0.1";
+    // Largest request body the HTTP front end reads
+    // (GRPC_VLM_HTTP_MAX_BODY_BYTES); a larger one is 413 before more than
+    // this is buffered. A request is held several times over (body, JSON,
+    // protobuf), so this bounds the front end's memory per request.
+    size_t http_max_body_bytes = 64ULL * 1024 * 1024;
+    // Bearer token every HTTP convert request must carry
+    // (GRPC_VLM_HTTP_TOKEN) as "Authorization: Bearer <token>"; /healthz
+    // stays open. Required when http_host is not a loopback address.
+    // Never printed or echoed.
+    Secret http_token;
 };
 
 // Reads and validates the environment. Throws std::invalid_argument with
