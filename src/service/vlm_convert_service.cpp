@@ -108,15 +108,27 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
     }
     const vlmv1::ConvertOptions options = request.options();
 
-    const std::string endpoint =
-        options.endpoint().empty() ? config_.endpoint : options.endpoint();
+    // A request naming the configured endpoint is not an override. Any
+    // other endpoint is, and is refused unless the operator opted in: it
+    // would let every caller make this process POST page images to any
+    // http host it can reach and read the answer back (SSRF).
+    const bool override =
+        !options.endpoint().empty() && options.endpoint() != config_.endpoint;
+    if (override && !config_.allow_endpoint_override) {
+        return client_error(grpc::StatusCode::PERMISSION_DENIED,
+                            "per-request endpoint overrides are disabled on this server (the "
+                            "operator enables them with GRPC_VLM_ALLOW_ENDPOINT_OVERRIDE=true)");
+    }
+    const std::string endpoint = override ? options.endpoint() : config_.endpoint;
     if (endpoint.empty()) {
         return client_error(grpc::StatusCode::FAILED_PRECONDITION,
-                            "no VLM endpoint configured (GRPC_VLM_ENDPOINT) and no per-request "
-                            "endpoint override");
+                            config_.allow_endpoint_override
+                                ? "no VLM endpoint configured (GRPC_VLM_ENDPOINT) and no "
+                                  "per-request endpoint override"
+                                : "no VLM endpoint configured (GRPC_VLM_ENDPOINT)");
     }
-    if (!endpoint_error(endpoint).empty()) {
-        return client_error(grpc::StatusCode::INVALID_ARGUMENT, endpoint_error(endpoint));
+    if (const std::string problem = endpoint_error(endpoint); !problem.empty()) {
+        return client_error(grpc::StatusCode::INVALID_ARGUMENT, problem);
     }
 
     std::string model, prompt;
@@ -318,7 +330,10 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
                      .max_tokens = max_tokens,
                      .top_logprobs = static_cast<int>(options.top_logprobs()),
                      .png = {},
-                     .timeout_seconds = static_cast<long>(config_.vlm_timeout_seconds)},
+                     .timeout_seconds = static_cast<long>(config_.vlm_timeout_seconds),
+                     // The operator's key goes to the operator's endpoint
+                     // only, never to one a request named.
+                     .api_key = override ? Secret() : config_.vlm_api_key},
             .format = format,
             .model = model,
         });

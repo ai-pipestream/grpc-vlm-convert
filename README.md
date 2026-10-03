@@ -51,7 +51,9 @@ Configuration is entirely `GRPC_VLM_*` environment variables:
 | Variable | Default | Meaning |
 |---|---|---|
 | `GRPC_VLM_LISTEN_ADDRESS` | `0.0.0.0:50058` | gRPC listen address |
-| `GRPC_VLM_ENDPOINT` | *(empty)* | OpenAI-compatible VLM endpoint. Empty is legal at startup; `ConvertPages` then needs a per-request endpoint or fails `FAILED_PRECONDITION` |
+| `GRPC_VLM_ENDPOINT` | *(empty)* | OpenAI-compatible VLM endpoint, `http://` only: a base (`http://vlm:8080`, an optional path prefix allowed) gets `/v1/chat/completions` appended, an OpenAI-style base ending in `/v1` gets `/chat/completions`, and a full `.../chat/completions` URL (Docling's `ApiVlmOptions.url`) is used as is; a query string rides along. No `user:password@` part. Checked at startup. Logs, errors and `GetServiceInfo` show only its scheme, host and port, never its path or query. Empty is legal at startup; `ConvertPages` then fails `FAILED_PRECONDITION` unless overrides are allowed and the request names an endpoint |
+| `GRPC_VLM_API_KEY` | *(empty)* | Bearer key for the configured endpoint, sent as `Authorization: Bearer <key>`. Never logged, returned or echoed, and never sent to an endpoint a request named. It crosses the network in clear text over `http://`: keep the VLM on a trusted network or behind a TLS proxy |
+| `GRPC_VLM_ALLOW_ENDPOINT_OVERRIDE` | `false` | `true` lets `ConvertOptions.endpoint` point a stream at another endpoint. Off, a request naming any endpoint other than the configured one fails `PERMISSION_DENIED`: an override lets every caller make this server POST to any host it can reach and read the answer back |
 | `GRPC_VLM_PRESETS` | *(all built-ins)* | Comma list of preset names the endpoint claims to serve, reported by `GetServiceInfo`. Built-ins: `smoldocling`, `granite-docling`, `got-ocr-2`, `granite-vision`, `deepseek-ocr`, `nanonets-ocr2`, `glm-ocr`, `lighton-ocr`, `north-micro-vision` (see `serving/north-micro-vision/` for an open-source endpoint that serves the last one on NVIDIA, Intel XPU or CPU) |
 | `GRPC_VLM_CONCURRENCY` | `2` | Pages in flight against the VLM per stream |
 | `GRPC_VLM_MAX_PAGE_BYTES` | `33554432` | Per-page PNG cap (`RESOURCE_EXHAUSTED`) |
@@ -81,7 +83,8 @@ curl -s http://localhost:50059/v1/convert -d '{
 ```
 
 Errors keep the gRPC matrix: 400 on `INVALID_ARGUMENT` (bad JSON, page_no
-0, non-PNG bytes), 413 on `RESOURCE_EXHAUSTED`, 501 on `UNIMPLEMENTED`
+0, non-PNG bytes), 403 on `PERMISSION_DENIED` (an endpoint override the
+server does not allow), 413 on `RESOURCE_EXHAUSTED`, 501 on `UNIMPLEMENTED`
 (PDF input), 500 otherwise. The body still carries the events collected
 before the failure plus an `error` object:
 

@@ -208,6 +208,10 @@ VlmResult generate(const VlmCall& call) {
     }
 
     const std::string payload = body.dump();
+    httplib::Headers headers;
+    if (!call.api_key.empty()) {
+        headers.emplace("Authorization", "Bearer " + call.api_key.reveal());
+    }
     httplib::Result response;
     int retries = 0;
     for (;;) {
@@ -224,7 +228,7 @@ VlmResult generate(const VlmCall& call) {
         client.set_connection_timeout(call.timeout_seconds, 0);
         client.set_read_timeout(call.timeout_seconds, 0);
         client.set_write_timeout(call.timeout_seconds, 0);
-        response = client.Post(where.target, payload, "application/json");
+        response = client.Post(where.target, headers, payload, "application/json");
         const bool retryable = response ? retryable_status(response->status)
                                         : retryable_transport(response.error());
         if (!retryable || retries == kMaxRetries) {

@@ -4,6 +4,8 @@
 #include <string>
 #include <vector>
 
+#include "secret.h"
+
 namespace vlm {
 
 // One page's call to the VLM endpoint.
@@ -30,6 +32,10 @@ struct VlmCall {
     std::string png;
     // Whole-call timeout in seconds.
     long timeout_seconds = 300;
+    // Sent as "Authorization: Bearer <key>" when set. The service sets it
+    // only for the endpoint the operator configured, never for one a
+    // request named.
+    Secret api_key{};
 };
 
 // One alternate reading the endpoint offered for a generated token.

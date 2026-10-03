@@ -68,10 +68,17 @@ struct FakeVlm {
     // thread.
     std::mutex mutex;
     nlohmann::json last_body;
+    // The Authorization header of the most recent request ("" when absent).
+    std::string last_authorization;
 
     nlohmann::json last_request() {
         std::lock_guard<std::mutex> lock(mutex);
         return last_body;
+    }
+
+    std::string authorization() {
+        std::lock_guard<std::mutex> lock(mutex);
+        return last_authorization;
     }
 
     void start() {
@@ -82,6 +89,7 @@ struct FakeVlm {
             {
                 std::lock_guard<std::mutex> lock(mutex);
                 last_body = body;
+                last_authorization = request.get_header_value("Authorization");
             }
             std::string url = body["messages"][0]["content"][1]["image_url"]["url"];
             const std::string prefix = "data:image/png;base64,";
@@ -449,11 +457,13 @@ void verify_error_matrix(const std::shared_ptr<grpc::Channel>& channel) {
     require(out.status.error_code() == grpc::StatusCode::INVALID_ARGUMENT,
             "non-PNG page bytes are INVALID_ARGUMENT");
 
+    // Overrides are off by default: even a malformed one is refused for
+    // being an override (verify_api_key_and_overrides covers the opt-in).
     vlmv1::ConvertOptions bad_endpoint;
     bad_endpoint.set_endpoint("not-a-url");
     out = convert(channel, bad_endpoint, {page(1, "PAGE1")});
-    require(out.status.error_code() == grpc::StatusCode::INVALID_ARGUMENT,
-            "malformed endpoint override is INVALID_ARGUMENT");
+    require(out.status.error_code() == grpc::StatusCode::PERMISSION_DENIED,
+            "an endpoint override without the operator opt-in is PERMISSION_DENIED");
 
     // Repeated options and PDF input, driven by hand.
     auto stub = vlmv1::VlmConvertService::NewStub(channel);
@@ -486,6 +496,70 @@ void verify_error_matrix(const std::shared_ptr<grpc::Channel>& channel) {
         }
         require(stream->Finish().error_code() == grpc::StatusCode::UNIMPLEMENTED,
                 "PDF input without a rasterizer is UNIMPLEMENTED");
+    }
+}
+
+// The operator's API key reaches the operator's endpoint and nothing else;
+// a request naming another endpoint is refused unless the operator opted
+// in, and even then never carries the key.
+void verify_api_key_and_overrides(FakeVlm* fake) {
+    const std::string key = "vlm-key-5f2a9c";
+    vlm::Config config;
+    config.endpoint = fake->endpoint();
+    config.vlm_api_key = vlm::Secret(key);
+    {
+        TestServer server(config);
+        vlmv1::ConvertOptions options;
+        Collected out = convert(server.channel, options, {page(1, "PAGE1")});
+        require(out.status.ok() && out.documents.size() == 1,
+                "keyed endpoint converts: " + out.status.error_message());
+        require(fake->authorization() == "Bearer " + key,
+                "the configured endpoint gets the bearer key");
+
+        // Naming the configured endpoint is not an override.
+        options.set_endpoint(fake->endpoint());
+        out = convert(server.channel, options, {page(1, "PAGE1")});
+        require(out.status.ok(), "naming the configured endpoint is allowed: " +
+                                     out.status.error_message());
+        require(fake->authorization() == "Bearer " + key,
+                "the key still goes to the configured endpoint");
+
+        // Any other endpoint is an override, refused before a call is made.
+        const long calls_before = fake->calls.load();
+        options.set_endpoint("http://127.0.0.1:1");
+        out = convert(server.channel, options, {page(1, "PAGE1")});
+        require(out.status.error_code() == grpc::StatusCode::PERMISSION_DENIED,
+                "an override without the opt-in is PERMISSION_DENIED");
+        require(out.status.error_message().contains("GRPC_VLM_ALLOW_ENDPOINT_OVERRIDE"),
+                "the refusal names the opt-in");
+        require(fake->calls.load() == calls_before, "a refused override reaches no endpoint");
+
+        // GetServiceInfo never carries the key.
+        auto stub = vlmv1::VlmConvertService::NewStub(server.channel);
+        grpc::ClientContext context;
+        vlmv1::GetServiceInfoResponse info;
+        require(stub->GetServiceInfo(&context, vlmv1::GetServiceInfoRequest(), &info).ok(),
+                "GetServiceInfo OK");
+        require(!info.DebugString().contains(key), "GetServiceInfo does not carry the key");
+        server.stop();
+    }
+
+    config.allow_endpoint_override = true;
+    {
+        TestServer server(config);
+        // Same server, different spelling: an override, so no key.
+        vlmv1::ConvertOptions options;
+        options.set_endpoint(fake->endpoint() + "/");
+        Collected out = convert(server.channel, options, {page(1, "PAGE1")});
+        require(out.status.ok(), "an allowed override converts: " + out.status.error_message());
+        require(fake->authorization().empty(), "an override never receives the operator's key");
+
+        vlmv1::ConvertOptions malformed;
+        malformed.set_endpoint("not-a-url");
+        out = convert(server.channel, malformed, {page(1, "PAGE1")});
+        require(out.status.error_code() == grpc::StatusCode::INVALID_ARGUMENT,
+                "a malformed allowed override is INVALID_ARGUMENT");
+        server.stop();
     }
 }
 
@@ -584,6 +658,7 @@ int main() {
         verify_alternatives(server.channel, &fake);
         verify_abort_on_error(server.channel);
         verify_error_matrix(server.channel);
+        verify_api_key_and_overrides(&fake);
         verify_no_endpoint();
         verify_page_byte_cap();
         verify_service_info(server.channel, fake.endpoint());

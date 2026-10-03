@@ -16,7 +16,8 @@ constexpr const char* kAllVars[] = {
     "GRPC_VLM_PRESETS",              "GRPC_VLM_CONCURRENCY",
     "GRPC_VLM_MAX_PAGE_BYTES",       "GRPC_VLM_MAX_PAGES",
     "GRPC_VLM_VLM_TIMEOUT_SECONDS",  "GRPC_VLM_METRICS_INTERVAL_SECONDS",
-    "GRPC_VLM_HTTP_PORT",
+    "GRPC_VLM_HTTP_PORT",            "GRPC_VLM_API_KEY",
+    "GRPC_VLM_ALLOW_ENDPOINT_OVERRIDE",
 };
 
 void clear_env() {
@@ -51,6 +52,30 @@ void verify_defaults() {
     require(config.vlm_timeout_seconds == 300, "default VLM timeout");
     require(config.metrics_interval_seconds == 60, "default metrics interval");
     require(config.http_port == 50059, "default HTTP port");
+    require(config.vlm_api_key.empty(), "no default API key");
+    require(!config.allow_endpoint_override, "endpoint overrides are off by default");
+}
+
+// The API key is read verbatim and never shown; the override opt-in takes
+// exactly true/false/1/0, so a typo cannot quietly open the SSRF door (or
+// leave it shut when the operator meant to open it).
+void verify_credentials_and_override_flag() {
+    clear_env();
+    ::setenv("GRPC_VLM_ENDPOINT", "http://vlm:8080", 1);
+    ::setenv("GRPC_VLM_API_KEY", "sk-test-7781", 1);
+    ::setenv("GRPC_VLM_ALLOW_ENDPOINT_OVERRIDE", "true", 1);
+    const vlm::Config config = vlm::load_config_from_env();
+    require(config.vlm_api_key.reveal() == "sk-test-7781", "API key read verbatim");
+    require(config.allow_endpoint_override, "override opt-in read");
+    const std::string banner = vlm::startup_banner(config);
+    require(!banner.contains("sk-test-7781"), "the banner never shows the key: " + banner);
+    require(banner.contains("API key set"), "the banner says a key is configured");
+    require(banner.contains("overrides allowed"), "the banner says overrides are allowed");
+
+    ::setenv("GRPC_VLM_ALLOW_ENDPOINT_OVERRIDE", "0", 1);
+    require(!vlm::load_config_from_env().allow_endpoint_override, "0 turns overrides off");
+    require(rejects("GRPC_VLM_ALLOW_ENDPOINT_OVERRIDE", "yes"), "a typo is rejected");
+    clear_env();
 }
 
 void verify_overrides_and_lists() {
@@ -145,6 +170,7 @@ int main() {
         verify_overrides_and_lists();
         verify_range_validation();
         verify_endpoint_validation_and_banner();
+        verify_credentials_and_override_flag();
         verify_http_port_disable();
     } catch (const std::exception& error) {
         std::println(stderr, "{}", error.what());

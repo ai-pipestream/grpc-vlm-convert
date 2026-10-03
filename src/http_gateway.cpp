@@ -23,6 +23,8 @@ const char* status_code_name(grpc::StatusCode code) {
             return "INVALID_ARGUMENT";
         case grpc::StatusCode::FAILED_PRECONDITION:
             return "FAILED_PRECONDITION";
+        case grpc::StatusCode::PERMISSION_DENIED:
+            return "PERMISSION_DENIED";
         case grpc::StatusCode::RESOURCE_EXHAUSTED:
             return "RESOURCE_EXHAUSTED";
         case grpc::StatusCode::UNIMPLEMENTED:
@@ -42,6 +44,8 @@ int http_status_for(grpc::StatusCode code) {
     switch (code) {
         case grpc::StatusCode::INVALID_ARGUMENT:
             return 400;
+        case grpc::StatusCode::PERMISSION_DENIED:
+            return 403;
         case grpc::StatusCode::RESOURCE_EXHAUSTED:
             return 413;
         case grpc::StatusCode::UNIMPLEMENTED:

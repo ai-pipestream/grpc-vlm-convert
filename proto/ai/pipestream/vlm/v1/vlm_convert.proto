@@ -29,14 +29,16 @@ service VlmConvertService {
   // single ConvertComplete trailer.
   //
   // Errors: no endpoint configured (and no per-request override) is
-  // FAILED_PRECONDITION; pages above the byte or page-count cap are
+  // FAILED_PRECONDITION; an endpoint override the server does not allow
+  // is PERMISSION_DENIED; pages above the byte or page-count cap are
   // RESOURCE_EXHAUSTED; malformed input (missing options, non-PNG page
   // bytes, zero page_no) is INVALID_ARGUMENT; PDF input without a
   // rasterizer built in is UNIMPLEMENTED.
   rpc ConvertPages(stream ConvertPagesRequest) returns (stream ConvertPagesResponse);
 
-  // Reports the server build, the configured endpoint, and which presets
-  // that endpoint claims to serve. Never triggers a model download.
+  // Reports the server build, the configured endpoint's scheme, host and
+  // port, and which presets that endpoint claims to serve. Never triggers
+  // a model download.
   rpc GetServiceInfo(GetServiceInfoRequest) returns (GetServiceInfoResponse);
 }
 
@@ -79,9 +81,13 @@ message ConvertOptions {
   // PNGs. Zero means the server default.
   double scale = 5;
 
-  // Per-request endpoint override (scheme://host:port, OpenAI-compatible
-  // /v1/chat/completions). Empty means the configured server endpoint.
-  // When both are empty the RPC fails with FAILED_PRECONDITION.
+  // Per-request endpoint override: an http:// base (/v1/chat/completions
+  // is appended; after a /v1 base only /chat/completions) or a full
+  // .../chat/completions URL, used as is. Empty means the configured
+  // server endpoint. Any other value is refused with PERMISSION_DENIED
+  // unless the operator allows overrides, and an override never receives
+  // the server's API key. When both are empty the RPC fails with
+  // FAILED_PRECONDITION.
   string endpoint = 6;
 
   // Pages in flight against the VLM for this stream. Zero means the
@@ -234,8 +240,9 @@ message GetServiceInfoRequest {}
 message GetServiceInfoResponse {
   // Semantic version of this server build.
   string version = 1;
-  // Configured VLM endpoint, e.g. "http://vlm:8080". Empty when none is
-  // configured; ConvertPages then requires a per-request endpoint.
+  // Configured VLM endpoint as scheme, host and port only, e.g.
+  // "http://vlm:8080": a path, query or credentials it carries are never
+  // reported. Empty when none is configured.
   string endpoint = 2;
   // Built-in presets the configured endpoint claims to serve.
   repeated VlmPreset presets = 3;

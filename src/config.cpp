@@ -29,6 +29,29 @@ std::string configured_string(const char* name, const std::string& fallback) {
     return raw == nullptr || *raw == '\0' ? fallback : raw;
 }
 
+// "true"/"1" or "false"/"0"; unset or empty is the fallback. Anything else
+// throws: a typo must not silently keep (or flip) a security default.
+bool configured_bool(const char* name, bool fallback) {
+    const char* raw = std::getenv(name);
+    if (raw == nullptr || *raw == '\0') {
+        return fallback;
+    }
+    const std::string value(raw);
+    if (value == "true" || value == "1") {
+        return true;
+    }
+    if (value == "false" || value == "0") {
+        return false;
+    }
+    throw std::invalid_argument(std::string(name) + " must be true, false, 1 or 0");
+}
+
+// A credential, verbatim (a key is exactly what the operator wrote).
+Secret configured_secret(const char* name) {
+    const char* raw = std::getenv(name);
+    return raw == nullptr ? Secret() : Secret(raw);
+}
+
 std::vector<std::string> configured_list(const char* name) {
     std::vector<std::string> values;
     const char* raw = std::getenv(name);
@@ -66,6 +89,9 @@ Config load_config_from_env() {
             throw std::invalid_argument("GRPC_VLM_ENDPOINT: " + problem);
         }
     }
+    config.vlm_api_key = configured_secret("GRPC_VLM_API_KEY");
+    config.allow_endpoint_override =
+        configured_bool("GRPC_VLM_ALLOW_ENDPOINT_OVERRIDE", config.allow_endpoint_override);
     config.presets = configured_list("GRPC_VLM_PRESETS");
     config.concurrency = configured_size("GRPC_VLM_CONCURRENCY", config.concurrency, 1, 64);
     config.max_page_bytes = configured_size("GRPC_VLM_MAX_PAGE_BYTES", config.max_page_bytes,
@@ -92,9 +118,21 @@ std::string startup_banner(const Config& config) {
         banner += " (HTTP on 0.0.0.0:" + std::to_string(config.http_port) + ")";
     }
     banner += " (endpoint ";
-    banner += config.endpoint.empty() ? "<none — per-request override required>"
-                                      : endpoint_origin(config.endpoint);
+    if (config.endpoint.empty()) {
+        banner += config.allow_endpoint_override
+                      ? "<none — per-request override required>"
+                      : "<none — ConvertPages fails until GRPC_VLM_ENDPOINT is set>";
+    } else {
+        banner += endpoint_origin(config.endpoint);
+    }
+    // Whether a key is configured, never the key.
+    if (!config.vlm_api_key.empty()) {
+        banner += ", API key set";
+    }
     banner += ")";
+    if (config.allow_endpoint_override) {
+        banner += " (per-request endpoint overrides allowed)";
+    }
     return banner;
 }
 

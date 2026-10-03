@@ -245,6 +245,18 @@ void verify_sync_non_png(httplib::Client& client) {
             "the message says why");
 }
 
+// An endpoint override without the operator's opt-in is PERMISSION_DENIED,
+// which the error matrix maps to 403.
+void verify_sync_override_refused(httplib::Client& client) {
+    vlmv1::ConvertOptions options;
+    options.set_endpoint("http://127.0.0.1:1");
+    auto result = client.Post("/v1/convert", convert_body(options, {page(1, "PAGE1")}).dump(),
+                              "application/json");
+    require(result && result->status == 403, "a refused override is 403");
+    const nlohmann::json body = nlohmann::json::parse(result->body);
+    require(body["error"]["code"] == "PERMISSION_DENIED", "403 names PERMISSION_DENIED");
+}
+
 // Collects an NDJSON response incrementally; lines() splits what has
 // arrived so far.
 struct Ndjson {
@@ -454,6 +466,7 @@ int main() {
         verify_sync_happy_path(server.client);
         verify_sync_garbage_json(server.client);
         verify_sync_non_png(server.client);
+        verify_sync_override_refused(server.client);
         verify_stream_flushes_per_event(server.client, fake);
         verify_envelope_shapes(server.client);
         verify_transport_uncapped(server.client);

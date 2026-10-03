@@ -51,6 +51,22 @@ vocabularies, the expected `response_format` (`DOCTAGS` / `MARKDOWN` /
 `endpoint` override, `concurrency` (pages in flight against the VLM),
 and `abort_on_error`.
 
+The `endpoint` override is refused with `PERMISSION_DENIED` unless the
+operator sets `GRPC_VLM_ALLOW_ENDPOINT_OVERRIDE=true`: it would let any
+caller point this server at any host it can reach (SSRF). Naming the
+configured endpoint itself is not an override. The operator's
+`GRPC_VLM_API_KEY` goes only to the configured endpoint, never to an
+override.
+
+An endpoint is an `http://` URL in one of three shapes: a base
+(`http://vlm:8080`, optionally with a path prefix) gets
+`/v1/chat/completions` appended, an OpenAI-style base ending in `/v1`
+gets `/chat/completions`, and a full `.../chat/completions` URL
+(Docling's `ApiVlmOptions.url`) is used as is. A `user:password@` part
+is refused. Only the endpoint's scheme, host and port ever leave the
+process (logs, errors, `GetServiceInfo`, `GenerationSource`), because
+deployments put tokens in the path and query.
+
 Events arrive in completion order, not page order:
 
 1. `PageStarted`: page_no.
@@ -74,7 +90,8 @@ takes the stream as three callables (read / write / cancelled), and the
 gRPC override and the HTTP handlers both drive that one pipeline, so
 concurrency caps, byte and page caps, `abort_on_error`, completion
 order, and the error matrix (INVALID_ARGUMENT → 400,
-RESOURCE_EXHAUSTED → 413, UNIMPLEMENTED → 501, else 500) cannot drift
+PERMISSION_DENIED → 403, RESOURCE_EXHAUSTED → 413, UNIMPLEMENTED →
+501, else 500) cannot drift
 between transports. Message bodies are canonical proto3 JSON
 (`MessageToJsonString` / `JsonStringToMessage`); nlohmann/json touches
 only the `{"options", "pages"}` envelope.
@@ -210,8 +227,9 @@ Every emitted item carries two sources: the `CollectorSource`
 (`vlm-convert`, the resolved model name, this server's version) and a
 `GenerationSource` describing the call that produced the page — the
 model the endpoint says answered (the requested name only when it
-echoes none), the endpoint origin (scheme and authority; the path is
-dropped because deployments hide tokens there), the `finish_reason`
+echoes none), the endpoint origin (scheme, host and port; userinfo,
+path and query are dropped because deployments hide tokens there), the
+`finish_reason`
 verbatim, and `prompt_tokens` / `completion_tokens` when the endpoint
 reports usage. All of it is optional on the wire and recorded only when
 present.

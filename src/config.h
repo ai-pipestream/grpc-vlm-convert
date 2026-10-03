@@ -4,6 +4,8 @@
 #include <string>
 #include <vector>
 
+#include "secret.h"
+
 namespace vlm {
 
 // Process configuration, entirely from GRPC_VLM_* environment variables.
@@ -17,6 +19,15 @@ struct Config {
     // with FAILED_PRECONDITION otherwise. Never printed or returned whole:
     // only endpoint_origin() of it leaves the process.
     std::string endpoint;
+    // Bearer key for the configured endpoint (GRPC_VLM_API_KEY), sent as
+    // "Authorization: Bearer <key>" on every call to it. Never printed,
+    // returned or echoed, and never sent to an endpoint a request named.
+    Secret vlm_api_key;
+    // Whether ConvertOptions.endpoint may point a stream at another VLM
+    // endpoint (GRPC_VLM_ALLOW_ENDPOINT_OVERRIDE=true). Off by default: an
+    // override lets any caller make this process POST page images to any
+    // http host it can reach and read the answer back.
+    bool allow_endpoint_override = false;
     // Preset names the configured endpoint claims to serve (comma list).
     // Empty means "every built-in preset" when an endpoint is set.
     std::vector<std::string> presets;
