@@ -1,0 +1,54 @@
+name: CI
+
+# Pull-request gate. Publish Images runs the test suite only on pushes to
+# main, so a pull request got no signal before it merged. This builds the
+# service image the way publishing does (the build stage compiles and runs
+# the CTest suite, so a failing test fails the build), boot-proofs it with
+# scripts/smoke-test.sh, and runs buf lint, format and breaking (against
+# the pull request's base) on the protos.
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build, test and boot-proof (linux/amd64)
+    runs-on: ubuntu-latest
+    # gRPC compiles from source in the build stage, and a hosted runner
+    # starts with no build cache.
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      - name: Build (runs the test suite in the build stage)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          provenance: false
+          sbom: false
+          load: true
+          tags: grpc-vlm-convert:ci
+      - name: Boot-proof the image
+        run: ./scripts/smoke-test.sh grpc-vlm-convert:ci
+
+  proto:
+    name: buf lint, format and breaking
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: bufbuild/buf-action@v1
+        with:
+          # The CLI is pinned and its download verified (buf-Linux-x86_64
+          # from the v1.71.0 release).
+          version: 1.71.0
+          checksum: d3de2838c68a5759ca276884254bc70df4e4ad185d6ed5f65f327b6ce6363eab
+          lint: true
+          format: true
+          breaking: true
+          push: false
+          pr_comment: false
