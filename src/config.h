@@ -41,7 +41,8 @@ struct Config {
     // VLM calls in flight across every stream (GRPC_VLM_MAX_INFLIGHT). The
     // endpoint's capacity is per process, not per stream: N streams at
     // full concurrency would otherwise queue N × concurrency requests on
-    // it, each with its timeout running.
+    // it, each with its timeout running. A page keeps its slot while its
+    // answer is mapped, so this also bounds the rasters decoded at once.
     size_t max_inflight = 8;
     size_t max_page_bytes = 32ULL * 1024 * 1024;
     size_t max_pages = 512;

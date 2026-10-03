@@ -8,7 +8,8 @@
 # Hermetic checks (no VLM endpoint needed, safe for CI and publish):
 #   1. closure: every shared library the server binary links resolves in
 #      the image
-#   2. non-root: the image runs as the numeric user 65532
+#   2. non-root: the image runs as the numeric user 65532, and exposes only
+#      the gRPC port (the HTTP front end binds loopback by default)
 #   3. boot-to-listening: with no GRPC_VLM_ENDPOINT the server must log its
 #      own "grpc-vlm-convert listening on" line, proving the loader, static
 #      initialization, and configuration parsing all ran, not a loader error
@@ -46,6 +47,13 @@ echo "== smoke: image runs as the non-root user 65532"
 image_user=$(docker inspect --format '{{.Config.User}}' "$image")
 if [[ "$image_user" != "65532:65532" ]]; then
   echo "expected USER 65532:65532, image has '${image_user:-root}'" >&2
+  exit 1
+fi
+
+echo "== smoke: image exposes only the gRPC port"
+exposed=$(docker inspect --format '{{range $port, $_ := .Config.ExposedPorts}}{{$port}} {{end}}' "$image")
+if [[ "$exposed" != "50058/tcp " ]]; then
+  echo "expected EXPOSE 50058 only, image exposes '${exposed}'" >&2
   exit 1
 fi
 

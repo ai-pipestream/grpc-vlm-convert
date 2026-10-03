@@ -57,7 +57,7 @@ Configuration is entirely `GRPC_VLM_*` environment variables:
 | `GRPC_VLM_LOGPROBS` | `true` | Ask the endpoint for `"logprobs": true` (the page's mean token log-probability). `false` omits the parameter for servers that reject it with a 400; a request for `top_logprobs` then fails `FAILED_PRECONDITION` |
 | `GRPC_VLM_PRESETS` | *(all built-ins)* | Comma list of preset names the endpoint claims to serve, reported by `GetServiceInfo`. Built-ins: `smoldocling`, `granite-docling`, `got-ocr-2`, `granite-vision`, `deepseek-ocr`, `nanonets-ocr2`, `glm-ocr`, `lighton-ocr`, `north-micro-vision` (see `serving/north-micro-vision/` for an open-source endpoint that serves the last one on NVIDIA, Intel XPU or CPU) |
 | `GRPC_VLM_CONCURRENCY` | `2` | Pages in flight against the VLM per stream (all streams together are capped by `GRPC_VLM_MAX_INFLIGHT`) |
-| `GRPC_VLM_MAX_INFLIGHT` | `8` | VLM calls in flight across every stream: the endpoint's capacity is per server, not per stream. A call past it waits here, its timeout not yet running |
+| `GRPC_VLM_MAX_INFLIGHT` | `8` | VLM calls in flight across every stream: the endpoint's capacity is per server, not per stream. A page holds its slot through mapping too, so this also bounds the page rasters decoded for picture crops at once. A call past it waits here, its timeout not yet running |
 | `GRPC_VLM_MAX_PAGE_BYTES` | `33554432` | Per-page PNG cap (`RESOURCE_EXHAUSTED`) |
 | `GRPC_VLM_MAX_PAGES` | `512` | Per-stream page cap (`RESOURCE_EXHAUSTED`) |
 | `GRPC_VLM_MAX_PAGE_CROP_BYTES` | `3145728` | Bytes of picture crops one `PageDocument` carries inline (as data URIs), so a picture-heavy page stays under the 4 MiB receive limit gRPC clients default to. Once a crop would cross it, that picture and the page's later ones go without an image and the page carries a `PAGE_WARNING_CODE_PICTURE_IMAGES_SKIPPED` warning. At least 1024 |
@@ -137,6 +137,10 @@ description) advertising this service's tab to the shared demo shell.
 
 Docker: `docker build -t grpc-vlm-convert .` The build stage runs the
 test suite and gates the image; the runtime is diskless (`--read-only`).
+The image exposes gRPC (50058) only: the HTTP front end binds loopback
+inside the container by default, where nothing outside can reach it. To
+serve HTTP from a container, set `GRPC_VLM_HTTP_HOST=0.0.0.0` and
+`GRPC_VLM_HTTP_TOKEN`, then publish the port (`-p 50059:50059`).
 
 ## Start here (humans and LLMs)
 

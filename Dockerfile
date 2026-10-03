@@ -38,9 +38,13 @@ ENV GRPC_VLM_LISTEN_ADDRESS=0.0.0.0:50058
 # --read-only; the VLM endpoint is another container:
 #   docker run --rm --read-only -e GRPC_VLM_ENDPOINT=http://vlm:8080 \
 #     -p 50058:50058 grpc-vlm-convert
-# The HTTP front end (50059) binds loopback inside the container unless
-# GRPC_VLM_HTTP_HOST=0.0.0.0 is set, which also requires
-# GRPC_VLM_HTTP_TOKEN.
+# Only gRPC is exposed: the HTTP front end (50059) binds loopback inside
+# the container by default, so nothing outside it can reach that port. To
+# serve HTTP, set GRPC_VLM_HTTP_HOST=0.0.0.0 with GRPC_VLM_HTTP_TOKEN (the
+# server refuses to start without one) and publish it:
+#   docker run --rm --read-only -e GRPC_VLM_ENDPOINT=http://vlm:8080 \
+#     -e GRPC_VLM_HTTP_HOST=0.0.0.0 -e GRPC_VLM_HTTP_TOKEN=... \
+#     -p 50058:50058 -p 50059:50059 grpc-vlm-convert
 USER 65532:65532
-EXPOSE 50058 50059
+EXPOSE 50058
 ENTRYPOINT ["/usr/local/bin/grpc-vlm-convert-server"]
