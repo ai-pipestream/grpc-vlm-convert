@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <deque>
 #include <exception>
+#include <limits>
 #include <mutex>
 #include <string_view>
 #include <thread>
@@ -204,9 +205,10 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
     std::atomic<uint32_t> ok{0};
     std::atomic<uint32_t> page_failed{0};
     // Set once nobody wants this stream's answers any more: the client
-    // cancelled, its deadline passed, or the consumer stopped taking
-    // events. Workers then skip queued pages, and every VLM call in flight
-    // is cut short (it is each call's cancel probe).
+    // cancelled, its deadline passed, the consumer stopped taking events,
+    // the input turned out bad, or abort_on_error met a failed page.
+    // Workers then skip queued pages, and every VLM call in flight is cut
+    // short (it is each call's cancel probe).
     std::atomic<bool> halt{false};
     std::atomic<bool> client_gone{false};
     auto halted = [&] { return halt.load(); };
@@ -373,6 +375,11 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
                     ok++;
                 }
                 events.push(std::move(event));
+                if (failed_page && options.abort_on_error()) {
+                    // The stream fails ABORTED now whatever happens to the
+                    // rest, so stop paying for pages nobody will receive.
+                    halt = true;
+                }
             }
         });
     }
@@ -404,6 +411,13 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
         if (image.page_no() == 0) {
             status = client_error(grpc::StatusCode::INVALID_ARGUMENT,
                                   "page_no is 1-based; got 0");
+            break;
+        }
+        // Provenance and the Document's pages map key pages as int32: a
+        // larger page_no would come out negative.
+        if (image.page_no() > static_cast<uint32_t>(std::numeric_limits<int32_t>::max())) {
+            status = client_error(grpc::StatusCode::INVALID_ARGUMENT,
+                                  "page_no above 2147483647: " + std::to_string(image.page_no()));
             break;
         }
         if (image.png().size() > config_.max_page_bytes) {
@@ -459,6 +473,11 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
             .stream_bytes = std::move(stream_lease),
             .process_bytes = std::move(process_lease),
         });
+    }
+    if (!status.ok()) {
+        // A bad page fails the whole stream: pages already queued would be
+        // paid for and thrown away, and calls in flight answer nobody.
+        halt = true;
     }
     jobs.close();
     for (std::thread& worker : workers) {

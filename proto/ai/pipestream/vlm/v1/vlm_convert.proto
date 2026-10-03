@@ -34,8 +34,8 @@ service VlmConvertService {
   // FAILED_PRECONDITION; an endpoint override the server does not allow
   // is PERMISSION_DENIED; pages above the byte or page-count cap are
   // RESOURCE_EXHAUSTED; malformed input (missing options, non-PNG page
-  // bytes, zero page_no) is INVALID_ARGUMENT; PDF input without a
-  // rasterizer built in is UNIMPLEMENTED.
+  // bytes, a page_no of zero or above 2147483647) is INVALID_ARGUMENT;
+  // PDF input without a rasterizer built in is UNIMPLEMENTED.
   rpc ConvertPages(stream ConvertPagesRequest) returns (stream ConvertPagesResponse);
 
   // Reports the server build, the configured endpoint's scheme, host and
@@ -97,9 +97,10 @@ message ConvertOptions {
   // streams together are also held to the server's own in-flight cap.
   uint32 concurrency = 7;
 
-  // When true, a single page failure fails the whole stream. Default
-  // false: a failed page produces a PageRaw error event and the rest of
-  // the document still converts.
+  // When true, a single page failure fails the whole stream: pages not
+  // yet sent to the model are skipped and calls in flight are cut.
+  // Default false: a failed page produces a PageRaw error event and the
+  // rest of the document still converts.
   bool abort_on_error = 8;
 
   // Ask the endpoint for the N best alternates per generated token. They
@@ -163,7 +164,8 @@ enum ResponseFormat {
 message PageImage {
   // PNG-encoded page raster.
   bytes png = 1;
-  // 1-based page number. Events key on this; out-of-order is legal.
+  // 1-based page number, at most 2147483647 (the Document keys pages as
+  // int32). Events key on this; out-of-order is legal.
   uint32 page_no = 2;
   // Raster width in pixels, used to scale DocTags locations to pixels.
   uint32 width = 3;

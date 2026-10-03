@@ -871,6 +871,14 @@ void verify_service_adversarial(FakeVlm* fake) {
     require(out.status.ok() && out.documents == 5 && out.complete.pages_ok() == 5,
             "concurrency 1 converts every page");
 
+    // A page_no past int32 would come out negative in provenance and in
+    // the Document's pages map: rejected up front.
+    out = convert(server.channel, options, {page(2147483648U, "BIGPAGE")});
+    require(out.status.error_code() == grpc::StatusCode::INVALID_ARGUMENT,
+            "page_no above 2^31-1 is INVALID_ARGUMENT");
+    out = convert(server.channel, options, {page(2147483647U, "MAXPAGE")});
+    require(out.status.ok() && out.documents == 1, "page_no 2^31-1 itself converts");
+
     // Duplicate page numbers pass through (the stream is a page sequence,
     // not a set) — both events arrive.
     out = convert(server.channel, options, {page(1, "P1"), page(1, "P1B")});

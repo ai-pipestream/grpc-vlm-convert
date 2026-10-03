@@ -828,6 +828,47 @@ void verify_process_inflight_cap(FakeVlm* fake) {
     server.stop();
 }
 
+// Once a stream is going to fail, pages nobody will receive are not paid
+// for: abort_on_error stops dispatching after the first failed page, and a
+// bad page mid-stream cuts the call in flight and skips the queue.
+void verify_failure_stops_dispatch(FakeVlm* fake) {
+    vlm::Config config;
+    config.endpoint = fake->endpoint();
+    config.concurrency = 1;
+    TestServer server(config);
+
+    vlmv1::ConvertOptions abort_options;
+    abort_options.set_abort_on_error(true);
+    long calls_before = fake->calls.load();
+    Collected out = convert(server.channel, abort_options,
+                            {page(1, "FAIL-1"), page(2, "PAGE-2"), page(3, "PAGE-3"),
+                             page(4, "PAGE-4")});
+    require(out.status.error_code() == grpc::StatusCode::ABORTED, "the stream aborts");
+    require(fake->calls.load() - calls_before == 6,
+            "only the failed page's 6 attempts reach the endpoint: " +
+                std::to_string(fake->calls.load() - calls_before));
+
+    fake->hold_released = false;
+    const long disconnects_before = fake->held_disconnects.load();
+    calls_before = fake->calls.load();
+    LiveStream live(server.channel, vlmv1::ConvertOptions());
+    live.upload({page(1, "HOLD-1"), page(2, "PAGE-2"), page(3, "PAGE-3")}, /*last=*/false);
+    const bool parked = wait_until([&] { return fake->holding.load() > 0; });
+    vlmv1::PageImage not_png = page(4, "PAGE-4");
+    not_png.set_png("plain bytes, not a png");
+    live.upload({not_png}, /*last=*/true);
+    const grpc::Status status = live.finish();
+    const bool cut = wait_until([&] { return fake->held_disconnects.load() > disconnects_before; });
+    fake->hold_released = true;
+    require(parked, "page 1 reached the model");
+    require(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT, "the bad page fails it");
+    require(cut, "the call in flight is cut");
+    require(fake->calls.load() - calls_before == 1, "queued pages never reach the endpoint: " +
+                                                        std::to_string(fake->calls.load() -
+                                                                       calls_before));
+    server.stop();
+}
+
 void verify_no_endpoint() {
     vlm::Config config;
     config.endpoint = "";
@@ -928,6 +969,7 @@ int main() {
         verify_stream_backpressure(&fake);
         verify_process_backpressure(&fake);
         verify_process_inflight_cap(&fake);
+        verify_failure_stops_dispatch(&fake);
         verify_no_endpoint();
         verify_page_byte_cap();
         verify_service_info(server.channel, fake.endpoint());

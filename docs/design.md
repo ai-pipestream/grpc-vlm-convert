@@ -274,9 +274,10 @@ server's `GRPC_VLM_MAX_INFLIGHT` slots, so many streams cannot pile
 requests onto an endpoint that serves one at a time.
 
 A stream halts once nobody will receive its answers: the client
-cancelled or its deadline passed, or the consumer stopped taking events.
-Queued pages are then skipped, calls in flight are cut, and nothing more
-is read.
+cancelled or its deadline passed, the consumer stopped taking events, a
+page turned out bad (`INVALID_ARGUMENT`, `RESOURCE_EXHAUSTED`, ...), or
+`abort_on_error` met a failed page. Queued pages are then skipped, calls
+in flight are cut, and nothing more is read.
 
 ## 5. Presets vs endpoints
 
