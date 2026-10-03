@@ -131,7 +131,10 @@ the numbers), so a cut table never passes for a complete one.
 
 ### HTML mapping rules
 
-Block matching spans newlines, since model output wraps its markup. A
+Block matching spans newlines, since model output wraps its markup, and
+is a linear scan rather than a regex: libstdc++'s regex engine recurses
+per character, and one 60 KB block overflowed the stack. A tag name
+matches exactly (`<p>` is not `<pre>`, `<tr>` is not `<track>`). A
 `<table>` carries real `TableData`: `<tr>` rows of `<th>`/`<td>` cells,
 1x1, ragged rows padded to a rectangular grid (padding is grid filler
 only, never a source cell), and the leading run of all-`<th>` rows

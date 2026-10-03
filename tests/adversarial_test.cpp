@@ -726,6 +726,59 @@ void verify_html_adversarial() {
             "cell whitespace collapses: " + doc.tables(0).data().grid(0).cells(0).text());
 }
 
+// Large blocks: the regex-based mapper recursed once per character of a
+// block and a single block of about 60 KB overflowed the stack, killing the
+// process. Run on a worker-sized thread, as the service does.
+void verify_html_large_blocks() {
+    std::string failure;
+    std::thread worker([&] {
+        try {
+            // The repetition-loop table (about 116 KB), now also capped.
+            std::string html = "<table><tr>";
+            for (int i = 0; i < 4000; i++) {
+                html += "<td>x</td>";
+            }
+            html += "</tr>";
+            for (int i = 0; i < 4000; i++) {
+                html += "<tr><td>y</td></tr>";
+            }
+            html += "</table>";
+            docv1::Document doc;
+            std::string error;
+            std::vector<vlmv1::PageWarning> warnings;
+            require(vlm::mapping::map_html(html, page_context(), &doc, &error, &warnings),
+                    "a 116 KB table maps: " + error);
+            require_capped(doc.tables(0).data(), warnings, "#/tables/0", "large HTML table");
+
+            // One 240 KB paragraph, with a <br> run and whitespace to fold.
+            doc.Clear();
+            const std::string words(240000, 'w');
+            require(vlm::mapping::map_html("<p>" + words + "<br   />" + std::string(5000, ' ') +
+                                               "end</p>",
+                                           page_context(), &doc, &error),
+                    "a 240 KB paragraph maps: " + error);
+            require(doc.texts(0).text().base().text() == words + " end",
+                    "the paragraph's text survives whole");
+
+            // Thousands of tags that never close: linear, and nothing maps.
+            std::string unclosed;
+            for (int i = 0; i < 30000; i++) {
+                unclosed += "<p>x";
+            }
+            doc.Clear();
+            const auto started = std::chrono::steady_clock::now();
+            require(!vlm::mapping::map_html(unclosed, page_context(), &doc, &error),
+                    "unclosed blocks still fail mapping");
+            require(std::chrono::steady_clock::now() - started < std::chrono::seconds(5),
+                    "a page of unclosed tags maps in linear time");
+        } catch (const std::exception& error) {
+            failure = error.what();
+        }
+    });
+    worker.join();
+    require(failure.empty(), failure);
+}
+
 // ---------------------------------------------------------------------------
 // VLM client attacks: hostile endpoint responses and endpoint URLs.
 // ---------------------------------------------------------------------------
@@ -1144,6 +1197,7 @@ int main() {
     run("image_crop_adversarial", verify_image_crop_adversarial);
     run("markdown_adversarial", verify_markdown_adversarial);
     run("html_adversarial", verify_html_adversarial);
+    run("html_large_blocks", verify_html_large_blocks);
     run("client_adversarial", [&] { verify_client_adversarial(&script_vlm); });
     run("presets_adversarial", verify_presets_adversarial);
     run("service_adversarial", [&] { verify_service_adversarial(&fake); });
