@@ -77,10 +77,18 @@ set(GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
 set(PROTO_DIR "${CMAKE_CURRENT_SOURCE_DIR}/proto")
 set(VLM_PROTOS
   "${PROTO_DIR}/ai/pipestream/document/v1/document.proto"
+  # Vendored verbatim from gRParse beside document.proto, which imports them
+  # for Document.analyses (the OpenNLP analyses; this service never fills them).
+  "${PROTO_DIR}/org/apache/opennlp/grpc/v1/opennlp_document.proto"
+  "${PROTO_DIR}/org/apache/opennlp/grpc/v1/opennlp_annotations.proto"
   "${PROTO_DIR}/ai/pipestream/vlm/v1/vlm_convert.proto")
 set(VLM_GENERATED
   "${GENERATED_DIR}/ai/pipestream/document/v1/document.pb.cc"
   "${GENERATED_DIR}/ai/pipestream/document/v1/document.pb.h"
+  "${GENERATED_DIR}/org/apache/opennlp/grpc/v1/opennlp_document.pb.cc"
+  "${GENERATED_DIR}/org/apache/opennlp/grpc/v1/opennlp_document.pb.h"
+  "${GENERATED_DIR}/org/apache/opennlp/grpc/v1/opennlp_annotations.pb.cc"
+  "${GENERATED_DIR}/org/apache/opennlp/grpc/v1/opennlp_annotations.pb.h"
   "${GENERATED_DIR}/ai/pipestream/vlm/v1/vlm_convert.pb.cc"
   "${GENERATED_DIR}/ai/pipestream/vlm/v1/vlm_convert.pb.h"
   "${GENERATED_DIR}/ai/pipestream/vlm/v1/vlm_convert.grpc.pb.cc"
@@ -101,6 +109,8 @@ add_custom_command(
 
 add_library(vlm_proto STATIC
   "${GENERATED_DIR}/ai/pipestream/document/v1/document.pb.cc"
+  "${GENERATED_DIR}/org/apache/opennlp/grpc/v1/opennlp_document.pb.cc"
+  "${GENERATED_DIR}/org/apache/opennlp/grpc/v1/opennlp_annotations.pb.cc"
   "${GENERATED_DIR}/ai/pipestream/vlm/v1/vlm_convert.pb.cc"
   "${GENERATED_DIR}/ai/pipestream/vlm/v1/vlm_convert.grpc.pb.cc")
 target_include_directories(vlm_proto PUBLIC "${GENERATED_DIR}")
