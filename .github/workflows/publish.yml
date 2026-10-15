@@ -41,6 +41,7 @@ env:
 
 jobs:
   build:
+    if: ${{ github.server_url == 'https://github.com' }}
     name: Build ${{ matrix.platform }}
     runs-on: ${{ matrix.runner }}
     # gRPC compiles from source in the build stage; a cold buildx cache
