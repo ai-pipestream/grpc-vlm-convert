@@ -1,5 +1,5 @@
-transformers==5.20.0
+transformers==5.20.2
 accelerate==1.15.0
 pillow==12.3.0
-fastapi==0.143.2
+fastapi==0.150.0
 uvicorn==0.54.0
