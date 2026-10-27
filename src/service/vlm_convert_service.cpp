@@ -178,6 +178,33 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
                             "unknown response_format value: " +
                                 std::to_string(static_cast<int>(format)));
     }
+    // docling's string spelling, for clients forwarding docling options.
+    if (!options.response_format_raw().empty()) {
+        const auto raw = response_format_from_docling(options.response_format_raw());
+        if (!raw) {
+            return client_error(grpc::StatusCode::INVALID_ARGUMENT,
+                                "response_format_raw names no docling response format: \"" +
+                                    options.response_format_raw() + "\"");
+        }
+        if (options.response_format() != vlmv1::RESPONSE_FORMAT_UNSPECIFIED &&
+            options.response_format() != *raw) {
+            return client_error(grpc::StatusCode::INVALID_ARGUMENT,
+                                "response_format " +
+                                    vlmv1::ResponseFormat_Name(options.response_format()) +
+                                    " conflicts with response_format_raw \"" +
+                                    options.response_format_raw() + "\"");
+        }
+        format = *raw;
+    }
+    // MinerU2 answers in two passes (layout, then per-region content);
+    // this service makes one call per page, so it fails before a page is
+    // read rather than mapping half a protocol.
+    if (!response_format_served(format)) {
+        return client_error(grpc::StatusCode::UNIMPLEMENTED,
+                            "response_format " + vlmv1::ResponseFormat_Name(format) +
+                                " is not served by this server (MinerU2's two-pass protocol "
+                                "is not implemented)");
+    }
     if (options.top_logprobs() > kMaxTopLogprobs) {
         return client_error(grpc::StatusCode::INVALID_ARGUMENT,
                             "top_logprobs must be 0.." +
@@ -566,6 +593,12 @@ grpc::Status VlmConvertServiceImpl::GetServiceInfo(
                     response->add_raw_presets(name);
                 }
             }
+        }
+    }
+    for (int value = vlmv1::ResponseFormat_MIN; value <= vlmv1::ResponseFormat_MAX; value++) {
+        const auto format = static_cast<vlmv1::ResponseFormat>(value);
+        if (response_format_served(format)) {
+            response->add_response_formats(format);
         }
     }
     response->set_concurrency(static_cast<uint32_t>(config_.concurrency));

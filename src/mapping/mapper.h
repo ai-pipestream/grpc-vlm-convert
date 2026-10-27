@@ -64,6 +64,26 @@ bool map_html(const std::string& text, const PageContext& page, docv1::Document*
               std::string* error, std::vector<vlmv1::PageWarning>* warnings = nullptr);
 bool map_otsl(const std::string& text, const PageContext& page, docv1::Document* out,
               std::string* error, std::vector<vlmv1::PageWarning>* warnings = nullptr);
+// The layout-grounded formats docling added after DocTags. Each emits the
+// raw heading depths the model wrote; docling normalizes section levels
+// once per document (the caller's job, since a page cannot).
+bool map_doclang(const std::string& text, const PageContext& page, docv1::Document* out,
+                 std::string* error, std::vector<vlmv1::PageWarning>* warnings = nullptr);
+bool map_deepseek_ocr(const std::string& text, const PageContext& page, docv1::Document* out,
+                      std::string* error, std::vector<vlmv1::PageWarning>* warnings = nullptr);
+bool map_unlimited_ocr(const std::string& text, const PageContext& page, docv1::Document* out,
+                       std::string* error, std::vector<vlmv1::PageWarning>* warnings = nullptr);
+bool map_chandra_html(const std::string& text, const PageContext& page, docv1::Document* out,
+                      std::string* error, std::vector<vlmv1::PageWarning>* warnings = nullptr);
+bool map_dots_json(const std::string& text, const PageContext& page, docv1::Document* out,
+                   std::string* error, std::vector<vlmv1::PageWarning>* warnings = nullptr);
+bool map_nemotron_parse_v2(const std::string& text, const PageContext& page,
+                           docv1::Document* out, std::string* error,
+                           std::vector<vlmv1::PageWarning>* warnings = nullptr);
+bool map_nemotron_parse_v3_5(const std::string& text, const PageContext& page,
+                             docv1::Document* out, std::string* error,
+                             std::vector<vlmv1::PageWarning>* warnings = nullptr);
+
 bool map_plaintext(const std::string& text, const PageContext& page, docv1::Document* out,
                    std::string* error);
 

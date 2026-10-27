@@ -114,6 +114,13 @@ message ConvertOptions {
   // the RPC fails INVALID_ARGUMENT. A long page times N alternates is a
   // lot of hypotheses, so ask only when something downstream reads them.
   uint32 top_logprobs = 9;
+
+  // docling's ResponseFormat string value ("nemotron_parse_v3_5"), for a
+  // client that forwards docling options verbatim. Empty means unset. It
+  // must name a docling format, and with response_format set both must
+  // name the same one; otherwise the RPC fails INVALID_ARGUMENT before a
+  // page is read. When response_format is unset this selects the format.
+  string response_format_raw = 10;
 }
 
 // Vision-language model presets, mirroring Docling's VlmModelType.
@@ -144,7 +151,10 @@ enum VlmPreset {
   VLM_PRESET_NORTH_MICRO_VISION = 10;
 }
 
-// Model response formats this service can map into Document items.
+// Model response formats, every member of docling's ResponseFormat as of
+// docling 2.142.1 with the numbering gRParse's parse_types.proto uses. All
+// but MINERU2 map into Document items (GetServiceInfoResponse
+// response_formats lists them).
 enum ResponseFormat {
   // The preset's default format.
   RESPONSE_FORMAT_UNSPECIFIED = 0;
@@ -160,6 +170,33 @@ enum ResponseFormat {
   RESPONSE_FORMAT_OTSL = 4;
   // Unstructured text; one TextItem per page.
   RESPONSE_FORMAT_PLAINTEXT = 5;
+  // docling "doclang": the DocLang XML vocabulary (docling-core's
+  // DocLangDocDeserializer). The first <doclang>...</doclang> fragment is
+  // read; <location> quartets become per-item boxes.
+  RESPONSE_FORMAT_DOCLANG = 6;
+  // docling "deepseekocr_markdown": DeepSeek-OCR grounding output,
+  // <|ref|>label<|/ref|><|det|>[[x1, y1, x2, y2]]<|/det|> lines on a 0-1000
+  // grid followed by each block's markdown or HTML table.
+  RESPONSE_FORMAT_DEEPSEEKOCR_MARKDOWN = 7;
+  // docling "unlimited_ocr_markdown": Unlimited-OCR grounding output,
+  // <|det|>label [x1, y1, x2, y2]<|/det|> annotations read as DeepSeek-OCR.
+  RESPONSE_FORMAT_UNLIMITED_OCR_MARKDOWN = 8;
+  // docling "chandra_html": Chandra's HTML dialect, layout blocks carrying
+  // data-label and data-bbox (0-1000 grid).
+  RESPONSE_FORMAT_CHANDRA_HTML = 9;
+  // docling "dots_json": dots.ocr / dots.mocr JSON layout elements
+  // (bbox, category, text), boxes in the Qwen2-VL resized input space.
+  RESPONSE_FORMAT_DOTS_JSON = 10;
+  // docling "nemotron_parse_v2": Nemotron Parse 2.0 regions
+  // <x_><y_>text<x_><y_><class_X>, boxes on the padded 1664x2048 canvas.
+  RESPONSE_FORMAT_NEMOTRON_PARSE_V2 = 11;
+  // docling "nemotron_parse_v3_5": Nemotron 3.5 Parse blocks, boxes
+  // normalized 0-1 to the page.
+  RESPONSE_FORMAT_NEMOTRON_PARSE_V3_5 = 12;
+  // docling "mineru2": MinerU2's two-pass layout then per-region
+  // recognition. Not served: a request naming it fails UNIMPLEMENTED
+  // before a page is read, and GetServiceInfo does not advertise it.
+  RESPONSE_FORMAT_MINERU2 = 13;
 }
 
 // One rendered page, PNG-encoded, as the coordinator's CV path already
@@ -304,6 +341,9 @@ message GetServiceInfoResponse {
   uint32 max_pages = 7;
   // Frontend advertisement for the shared demo shell.
   UiInfo ui = 8;
+  // Response formats this server maps, in enum order. A format missing
+  // here fails a ConvertPages stream UNIMPLEMENTED.
+  repeated ResponseFormat response_formats = 9;
 }
 
 // Frontend advertisement. Same shape in every ai-pipestream grpc service:

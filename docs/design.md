@@ -118,6 +118,42 @@ synchronous route passes the connection's liveness as the pipeline's
 | HTML | block-level snippet mapper (headings, paragraphs, list items, code, tables with real `TableData`) + page bbox = full page |
 | OTSL | table-shaped items |
 | Plaintext | one `TextItem` per page |
+| DocLang | first `<doclang>` fragment (docling-core's DocLangDocDeserializer vocabulary): `<location>` quartets on the `<default_resolution>` grid (512) scale to the page; headings (level 1 is the title), text runs with formatting, lists split by `<ldiv>`, OTSL tables and indexes, pictures with label classification and `<tabular>` charts, float groups with caption and footnote satellites, `<layer>` content layers. No fragment fails with docling's message |
+| DeepSeek-OCR markdown | `<|ref|>label<|/ref|><|det|>[[l,t,r,b]]<|/det|>` blocks on the 0..999 grid; unlabeled lead text is dropped as docling drops it; HTML tables become `TableData` |
+| Unlimited-OCR markdown | `<|det|>label [l,t,r,b]<|/det|>` annotations rewritten to the DeepSeek-OCR shape (docling's normalize_unlimited_ocr_annotations), then mapped as DeepSeek-OCR |
+| Chandra HTML | `<div data-bbox data-label>` blocks on the 0..1000 grid; inline HTML keeps formatting runs; tables keep spans and headers |
+| dots.ocr JSON | layout cells with `bbox` (Qwen2-VL resized image pixels) and `category`; markdown headings carry their level and `orig`; captions link to the adjacent picture, table or code |
+| Nemotron Parse 2.0 | `<x_><y_>text<x_><y_><class_>` regions on the padded square canvas, undone to the page; LaTeX tabular tables; charts with their pipe table as `tabular_chart` |
+| Nemotron Parse 3.5 | normalized `<class_>` blocks with artifact and duplicate removal, boxes clamped to the page; LaTeX tabular tables with multirow/multicolumn; chart panels; TOC groups |
+| MinerU2 | not served: a stream naming it fails `UNIMPLEMENTED` before a page is read (its two-pass layout-then-content protocol needs more than one call per page), and `GetServiceInfo.response_formats` omits it |
+
+`ConvertOptions.response_format_raw` takes docling's string value
+(`"dots_json"`); an unknown name, or one that disagrees with a set
+`response_format`, fails `INVALID_ARGUMENT` before a page is read.
+
+Headings come out at the depth the model wrote them. docling normalizes
+heading depth document-wide for the Chandra, DeepSeek-OCR, Unlimited-OCR,
+dots.ocr and Nemotron formats (when no heading sits at level 1, every
+level moves up one); a page fragment cannot see the whole document, so
+the consumer that assembles pages (gRParse) applies that step.
+
+Deviations from docling 2.142.1, each a choice for a page-at-a-time
+service rather than an oversight:
+
+- Missing or malformed coordinates give the full-page box, never an
+  invented one; oversize tables are cut to the caps below rather than
+  raising.
+- Markdown emphasis inside dots.ocr and Nemotron 3.5 text uses a
+  CommonMark-style delimiter-run renderer, an approximation of marko.
+- Nemotron Parse 2.0 tables use the same tabular parser as 3.5, not
+  docling's LaTeX backend.
+- Code language is the model's hint (`code_language_raw`), not detected.
+- A chart whose table has no rows carries no `tabular_chart`.
+- DocLang: `<thread>` continuations stay separate items, `<page_break>`
+  does not open a new page (one response is one page), `<custom>`
+  metadata and archive `<src>` images are ignored, rich table cells are
+  flattened to text, and `field_*` form elements are walked as plain
+  content.
 
 ### Size caps and page warnings
 
@@ -374,5 +410,11 @@ the other `stop: ["</doctag>", "<|end_of_text|>"]` with `max_tokens`
   still runs (`abort_on_error` false). The 503 is retried first (the
   client test counts the attempts), with test backoff pinned to zero.
 - No endpoint configured → `FAILED_PRECONDITION`.
+- Formats 6-13 (`docling-formats-test`): one answer per format shaped
+  like docling's own tests and fixtures, checked for the items docling
+  builds; MinerU2 fails typed. The service test covers
+  `response_format_raw` selection, agreement, conflict and exact-name
+  matching, MinerU2 `UNIMPLEMENTED` with no model call, and the
+  `response_formats` advertisement.
 - Golden: one real page against a live VLM endpoint, behind a flag, not
   CI default.
