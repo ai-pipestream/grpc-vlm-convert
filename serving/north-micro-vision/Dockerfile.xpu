@@ -6,7 +6,7 @@
 # PyTorch XPU wheel index and brings its oneAPI runtime pieces via pip.
 # Pinned by digest: the tag moves with every llama.cpp release. Bump the
 # digest deliberately (docker buildx imagetools inspect the tag).
-FROM ghcr.io/ggml-org/llama.cpp:server-intel@sha256:2ecfe61c6aa395589ca3b437999ae97f07ca909a88fe2fe426e150ea88a06117
+FROM ghcr.io/ggml-org/llama.cpp:server-intel@sha256:0f0ead2c67d2da050aa768669f29de779711f7c759538b09b967f2a8bbccaabf
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv \
     && rm -rf /var/lib/apt/lists/*
