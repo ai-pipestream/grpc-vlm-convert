@@ -1,6 +1,7 @@
 #include "presets.h"
 
 #include <algorithm>
+#include <cctype>
 
 namespace vlm {
 
@@ -92,6 +93,42 @@ bool resolve_request(const vlmv1::ConvertOptions& options, std::string* model,
         *format = options.response_format();
     }
     return true;
+}
+
+std::optional<vlmv1::ResponseFormat> response_format_from_docling(const std::string& value) {
+    if (value.empty()) {
+        return std::nullopt;
+    }
+    std::string name = "RESPONSE_FORMAT_";
+    for (const char c : value) {
+        if (std::isupper(static_cast<unsigned char>(c)) != 0) {
+            return std::nullopt;
+        }
+        name += static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    }
+    vlmv1::ResponseFormat format = vlmv1::RESPONSE_FORMAT_UNSPECIFIED;
+    if (!vlmv1::ResponseFormat_Parse(name, &format) ||
+        format == vlmv1::RESPONSE_FORMAT_UNSPECIFIED) {
+        return std::nullopt;
+    }
+    return format;
+}
+
+std::string docling_response_format_name(vlmv1::ResponseFormat format) {
+    if (format == vlmv1::RESPONSE_FORMAT_UNSPECIFIED || !vlmv1::ResponseFormat_IsValid(format)) {
+        return "";
+    }
+    std::string name = vlmv1::ResponseFormat_Name(format).substr(16);
+    for (char& c : name) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return name;
+}
+
+bool response_format_served(vlmv1::ResponseFormat format) {
+    return vlmv1::ResponseFormat_IsValid(format) &&
+           format != vlmv1::RESPONSE_FORMAT_UNSPECIFIED &&
+           format != vlmv1::RESPONSE_FORMAT_MINERU2;
 }
 
 }  // namespace vlm

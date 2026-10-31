@@ -130,6 +130,14 @@ add_library(vlm_core STATIC
   src/mapping/html.cpp
   src/mapping/otsl.cpp
   src/mapping/image_crop.cpp
+  src/mapping/markup_tree.cpp
+  src/mapping/layout.cpp
+  src/mapping/markdown_inline.cpp
+  src/mapping/deepseek.cpp
+  src/mapping/chandra.cpp
+  src/mapping/dots.cpp
+  src/mapping/nemotron.cpp
+  src/mapping/doclang.cpp
   src/service/vlm_convert_service.cpp)
 target_include_directories(vlm_core PUBLIC src)
 # stb headers as SYSTEM: third-party warnings must not trip -Werror.
@@ -153,6 +161,7 @@ if(BUILD_TESTING)
   set(GRPC_VLM_TESTS
     adversarial-test
     config-test
+    docling-formats-test
     doctags-mapper-test
     http-api-test
     markdown-mapper-test

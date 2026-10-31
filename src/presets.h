@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -43,5 +44,19 @@ bool resolve_request(const ai::pipestream::vlm::v1::ConvertOptions& options,
                      std::string* model, std::string* prompt,
                      ai::pipestream::vlm::v1::ResponseFormat* format,
                      std::vector<std::string>* stop, int* max_tokens);
+
+// docling's ResponseFormat string value ("dots_json") to the enum: the
+// enum name without its RESPONSE_FORMAT_ prefix, lowercased. Exact match,
+// as docling's str enum is; nullopt for anything else.
+std::optional<ai::pipestream::vlm::v1::ResponseFormat> response_format_from_docling(
+    const std::string& value);
+
+// The docling string value of a format ("" for UNSPECIFIED or unknown).
+std::string docling_response_format_name(ai::pipestream::vlm::v1::ResponseFormat format);
+
+// Whether this server maps the format into Document items. Every docling
+// format except MINERU2 (a two-pass protocol this one-call-per-page
+// service does not drive).
+bool response_format_served(ai::pipestream::vlm::v1::ResponseFormat format);
 
 }  // namespace vlm
