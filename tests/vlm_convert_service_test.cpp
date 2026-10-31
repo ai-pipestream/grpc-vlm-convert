@@ -22,6 +22,7 @@
 
 #include "config.h"
 #include "fixture.h"
+#include "presets.h"
 #include "mapping/image_crop.h"
 #include "service/vlm_convert_service.h"
 #include "vlm_client.h"
@@ -63,6 +64,7 @@ std::string base64_decode(const std::string& encoded) {
 //   MDPAGE  → canned markdown
 //   RAWTEXT → prose without markup (mapping failure for DocTags)
 //   PICTURES → canned DocTags with two full-page pictures
+//   DOTSPAGE → canned dots.ocr layout JSON
 //   else    → canned DocTags naming the marker
 struct FakeVlm {
     httplib::Server server;
@@ -153,6 +155,10 @@ struct FakeVlm {
             std::string content;
             if (png.contains("MDPAGE")) {
                 content = "# Converted Page\n\nA markdown paragraph.\n";
+            } else if (png.contains("DOTSPAGE")) {
+                content =
+                    "[{\"bbox\": [10, 10, 200, 40], \"category\": \"Title\", \"text\": "
+                    "\"# Dots Title\"}]";
             } else if (png.contains("RAWTEXT")) {
                 content = "just plain words with no markup";
             } else if (png.contains("PICTURES")) {
@@ -463,6 +469,9 @@ void verify_streaming_and_failure_isolation(const std::shared_ptr<grpc::Channel>
                 "the answering endpoint is recorded");
         require(generation.finish_reason() == "length",
                 "a truncated page says so, verbatim");
+        require(generation.stop_reason() == docv1::VLM_STOP_REASON_LENGTH &&
+                    !generation.has_truncation(),
+                "length is typed without claiming repetition cancellation");
         require(generation.prompt_tokens() == 1200 && generation.completion_tokens() == 512,
                 "token usage rides the fragment");
     }
@@ -497,6 +506,62 @@ void verify_markdown_and_raw_fallback(const std::shared_ptr<grpc::Channel>& chan
             "PageRaw keeps the model text");
     require(!raw.raws[0].error().empty(), "PageRaw names the mapping failure");
     require(raw.complete.pages_failed() == 1, "trailer counts the failed page");
+}
+
+// docling's string spelling selects the format (response_format_raw);
+// with response_format set both must agree; an unknown name and MinerU2
+// fail before a page is paid for.
+void verify_response_format_raw(const std::shared_ptr<grpc::Channel>& channel, FakeVlm* fake) {
+    vlmv1::ConvertOptions raw;
+    raw.set_response_format_raw("dots_json");
+    Collected out = convert(channel, raw, {page(1, "DOTSPAGE1")});
+    require(out.status.ok(), "response_format_raw dots_json OK: " + out.status.error_message());
+    require(out.documents.size() == 1 && out.documents[0].document().texts_size() == 1 &&
+                out.documents[0].document().texts(0).has_title(),
+            "response_format_raw selects the dots.ocr mapper");
+
+    vlmv1::ConvertOptions agree;
+    agree.set_response_format(vlmv1::RESPONSE_FORMAT_DOTS_JSON);
+    agree.set_response_format_raw("dots_json");
+    out = convert(channel, agree, {page(1, "DOTSPAGE1")});
+    require(out.status.ok() && out.documents.size() == 1,
+            "matching response_format and response_format_raw are accepted");
+
+    const long calls_before = fake->calls.load();
+    vlmv1::ConvertOptions conflict;
+    conflict.set_response_format(vlmv1::RESPONSE_FORMAT_MARKDOWN);
+    conflict.set_response_format_raw("dots_json");
+    out = convert(channel, conflict, {page(1, "DOTSPAGE1")});
+    require(out.status.error_code() == grpc::StatusCode::INVALID_ARGUMENT &&
+                out.status.error_message().contains("conflicts"),
+            "conflicting response_format_raw is INVALID_ARGUMENT");
+
+    vlmv1::ConvertOptions unknown;
+    unknown.set_response_format_raw("DOTS_JSON");
+    out = convert(channel, unknown, {page(1, "DOTSPAGE1")});
+    require(out.status.error_code() == grpc::StatusCode::INVALID_ARGUMENT,
+            "response_format_raw matches docling's lowercase values exactly");
+
+    vlmv1::ConvertOptions mineru;
+    mineru.set_response_format(vlmv1::RESPONSE_FORMAT_MINERU2);
+    out = convert(channel, mineru, {page(1, "PAGE1")});
+    require(out.status.error_code() == grpc::StatusCode::UNIMPLEMENTED,
+            "MINERU2 is UNIMPLEMENTED");
+    vlmv1::ConvertOptions mineru_raw;
+    mineru_raw.set_response_format_raw("mineru2");
+    out = convert(channel, mineru_raw, {page(1, "PAGE1")});
+    require(out.status.error_code() == grpc::StatusCode::UNIMPLEMENTED,
+            "mineru2 by its raw name is UNIMPLEMENTED");
+    require(fake->calls.load() == calls_before, "rejected streams never call the model");
+
+    for (const char* name : {"doctags", "markdown", "html", "otsl", "plaintext", "doclang",
+                             "deepseekocr_markdown", "unlimited_ocr_markdown", "chandra_html",
+                             "dots_json", "nemotron_parse_v2", "nemotron_parse_v3_5",
+                             "mineru2"}) {
+        const auto format = vlm::response_format_from_docling(name);
+        require(format.has_value() && vlm::docling_response_format_name(*format) == name,
+                std::string("docling name round-trips: ") + name);
+    }
 }
 
 // Per-preset generation parameters reach the wire: granite-docling and
@@ -1109,6 +1174,13 @@ void verify_service_info(const std::shared_ptr<grpc::Channel>& channel,
     require(!info.version().empty(), "version reported");
     require(info.endpoint() == endpoint, "endpoint reported");
     require(info.presets_size() == 9, "all built-in presets reported by default");
+    require(info.response_formats_size() == 12 &&
+                info.response_formats(0) == vlmv1::RESPONSE_FORMAT_DOCTAGS &&
+                info.response_formats(11) == vlmv1::RESPONSE_FORMAT_NEMOTRON_PARSE_V3_5,
+            "response_formats lists DOCTAGS..NEMOTRON_PARSE_V3_5 in enum order");
+    for (const auto format : info.response_formats()) {
+        require(format != vlmv1::RESPONSE_FORMAT_MINERU2, "MINERU2 is not advertised");
+    }
     require(info.concurrency() > 0 && info.max_page_bytes() > 0 && info.max_pages() > 0,
             "limits reported");
     require(info.ui().title() == "VLM Convert" && info.ui().path() == "/ui/vlm-convert" &&
@@ -1167,6 +1239,7 @@ int main() {
         require(fake.calls.load() - calls_before > 3,
                 "the persistently-503 page was retried: more calls than pages");
         verify_markdown_and_raw_fallback(server.channel);
+        verify_response_format_raw(server.channel, &fake);
         verify_stop_and_max_tokens(server.channel, &fake);
         verify_alternatives(server.channel, &fake);
         verify_page_warnings(server.channel);

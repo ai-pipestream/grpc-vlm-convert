@@ -325,7 +325,7 @@ inline void stamp_text_item(docv1::BaseTextItem& item, const std::string& self_r
 // DocTags list/inline groups; their children are parented to the group,
 // not the body, at emission time.
 struct BodyChild {
-    enum Kind { TEXT = 0, PICTURE = 1, TABLE = 2, KEY_VALUE = 3, GROUP = 4 };
+    enum Kind { TEXT = 0, PICTURE = 1, TABLE = 2, KEY_VALUE = 3, GROUP = 4, FIELD_REGION = 5 };
     Kind kind;
     int index;
 };
@@ -347,6 +347,9 @@ inline std::string body_child_ref(BodyChild::Kind kind, int index) {
             break;
         case BodyChild::GROUP:
             list = "groups";
+            break;
+        case BodyChild::FIELD_REGION:
+            list = "field_regions";
             break;
     }
     return "#/" + std::string(list) + "/" + std::to_string(index);
@@ -387,6 +390,10 @@ inline void finalize_document(docv1::Document* doc, const PageContext& page,
             docv1::KeyValueItem* kv = doc->mutable_key_value_items(child.index);
             kv->set_self_ref(self_ref);
             kv->mutable_parent()->set_ref("#/body");
+        } else if (child.kind == BodyChild::FIELD_REGION) {
+            docv1::FieldRegionItem* region = doc->mutable_field_regions(child.index);
+            region->set_self_ref(self_ref);
+            region->mutable_parent()->set_ref("#/body");
         } else {
             // Groups: self ref and body parent here; their children were
             // parented to the group when it was emitted.

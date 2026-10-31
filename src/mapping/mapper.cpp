@@ -30,6 +30,23 @@ bool map_response(vlmv1::ResponseFormat format, const std::string& text,
             return map_otsl(text, page, out, error, warnings);
         case vlmv1::RESPONSE_FORMAT_PLAINTEXT:
             return map_plaintext(text, page, out, error);
+        case vlmv1::RESPONSE_FORMAT_DOCLANG:
+            return map_doclang(text, page, out, error, warnings);
+        case vlmv1::RESPONSE_FORMAT_DEEPSEEKOCR_MARKDOWN:
+            return map_deepseek_ocr(text, page, out, error, warnings);
+        case vlmv1::RESPONSE_FORMAT_UNLIMITED_OCR_MARKDOWN:
+            return map_unlimited_ocr(text, page, out, error, warnings);
+        case vlmv1::RESPONSE_FORMAT_CHANDRA_HTML:
+            return map_chandra_html(text, page, out, error, warnings);
+        case vlmv1::RESPONSE_FORMAT_DOTS_JSON:
+            return map_dots_json(text, page, out, error, warnings);
+        case vlmv1::RESPONSE_FORMAT_NEMOTRON_PARSE_V2:
+            return map_nemotron_parse_v2(text, page, out, error, warnings);
+        case vlmv1::RESPONSE_FORMAT_NEMOTRON_PARSE_V3_5:
+            return map_nemotron_parse_v3_5(text, page, out, error, warnings);
+        case vlmv1::RESPONSE_FORMAT_MINERU2:
+            *error = "MinerU2 responses are not supported";
+            return false;
         default:
             *error = "unresolved response format";
             return false;
