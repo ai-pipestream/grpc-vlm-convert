@@ -8,11 +8,13 @@
 #include <exception>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <string_view>
 #include <thread>
 #include <vector>
 
 #include "mapping/mapper.h"
+#include "nemotron_passes.h"
 #include "presets.h"
 #include "vlm_client.h"
 
@@ -99,6 +101,8 @@ struct PageJob {
     VlmCall call;
     vlmv1::ResponseFormat format;
     std::string model;
+    // Set for a Nemotron Parse double or triple pass.
+    std::optional<NemotronPasses> nemotron;
     // The page's share of the stream's and the process's buffer budgets,
     // given back when the job is destroyed: once its answer is mapped, or
     // when a halted stream skips it.
@@ -218,6 +222,12 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
                             "top_logprobs needs logprobs, which this server does not request "
                             "from its endpoint (GRPC_VLM_LOGPROBS=false)");
     }
+    std::string nemotron_error;
+    const std::optional<NemotronPasses> nemotron =
+        nemotron_passes_for(options, format, &nemotron_error);
+    if (!nemotron_error.empty()) {
+        return client_error(grpc::StatusCode::INVALID_ARGUMENT, nemotron_error);
+    }
     const size_t concurrency =
         options.concurrency() == 0
             ? config_.concurrency
@@ -300,7 +310,17 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
         page.source.set_version(GRPC_VLM_VERSION);
         job.call.png = page.png;
         job.call.cancelled = halted;
-        const VlmResult result = generate(job.call);
+        VlmResult result;
+        std::string shortfall;
+        if (job.nemotron) {
+            NemotronPassResult passed = run_nemotron_passes(
+                job.call, *job.nemotron,
+                [&](const std::vector<VlmCall>& calls) { return run_within_slots(calls, vlm_slots_); });
+            result = std::move(passed.result);
+            shortfall = std::move(passed.shortfall);
+        } else {
+            result = generate(job.call);
+        }
         if (result.cancelled) {
             return false;  // cut short because nobody is waiting for it
         }
@@ -376,6 +396,11 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
             *document->mutable_document() = std::move(fragment);
             // What the mapper cut to a server cap rides beside the
             // fragment, so a short table never passes for a complete one.
+            if (!shortfall.empty()) {
+                vlmv1::PageWarning& warning = warnings.emplace_back();
+                warning.set_code(vlmv1::PAGE_WARNING_CODE_NEMOTRON_PASS_INCOMPLETE);
+                warning.set_message(shortfall);
+            }
             for (vlmv1::PageWarning& warning : warnings) {
                 *document->add_warnings() = std::move(warning);
             }
@@ -535,6 +560,7 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
                      .cancelled = {}},
             .format = format,
             .model = model,
+            .nemotron = nemotron,
             .stream_bytes = std::move(stream_lease),
             .process_bytes = std::move(process_lease),
         });

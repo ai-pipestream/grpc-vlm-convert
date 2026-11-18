@@ -121,6 +121,51 @@ message ConvertOptions {
   // name the same one; otherwise the RPC fails INVALID_ARGUMENT before a
   // page is read. When response_format is unset this selects the format.
   string response_format_raw = 10;
+
+  // docling's NemotronParseOptions. Read only with the nemotron_parse_v3_5
+  // response format; a double or triple pass with any other format fails
+  // INVALID_ARGUMENT. Unset means the single page pass.
+  NemotronParseOptions nemotron_parse = 11;
+}
+
+// How Nemotron Parse 3.5 reads a page, mirroring docling's
+// NemotronParseOptions. A double or triple pass parses each Table and
+// Chart region again from a crop and keeps the crop's text only where its
+// structure checks out, so a page costs one call per region more. It
+// cannot be combined with top_logprobs: the merged page text is not text
+// the model generated, so it has no token alternates (INVALID_ARGUMENT).
+message NemotronParseOptions {
+  // Unspecified is the single pass.
+  NemotronParsePasses passes = 1;
+  // Which regions a triple pass crops. Unspecified is union.
+  NemotronParseTripleRegions triple_regions = 2;
+  // Crop calls sent together for one page; zero means docling's default
+  // of 8. They also count against the server's in-flight cap: a crop runs
+  // beside the page's own call only on a slot that is free.
+  uint32 crop_batch_size = 3;
+}
+
+// docling's NemotronParseOptions.passes.
+enum NemotronParsePasses {
+  // The single pass.
+  NEMOTRON_PARSE_PASSES_UNSPECIFIED = 0;
+  // One page call; the page as the model read it.
+  NEMOTRON_PARSE_PASSES_SINGLE = 1;
+  // The page call, then one call per Table or Chart region it found.
+  NEMOTRON_PARSE_PASSES_DOUBLE = 2;
+  // The page call, a detection call that only finds regions, then one
+  // call per region.
+  NEMOTRON_PARSE_PASSES_TRIPLE = 3;
+}
+
+// docling's NemotronParseOptions.triple_regions.
+enum NemotronParseTripleRegions {
+  // Union.
+  NEMOTRON_PARSE_TRIPLE_REGIONS_UNSPECIFIED = 0;
+  // Only the regions the detection call found.
+  NEMOTRON_PARSE_TRIPLE_REGIONS_DETECTOR = 1;
+  // The detected regions, plus page call regions the detector missed.
+  NEMOTRON_PARSE_TRIPLE_REGIONS_UNION = 2;
 }
 
 // Vision-language model presets, mirroring Docling's VlmModelType.
@@ -255,15 +300,16 @@ message PageDocument {
   // The page's items. DocTags responses carry real bounding boxes;
   // markdown/HTML/plaintext responses carry the full-page box only.
   ai.pipestream.document.v1.Document document = 2;
-  // Where the fragment is less than the model's answer: something cut to
-  // a server cap rather than mapped whole. Empty when nothing was cut.
+  // Where the fragment is less than it should be: something cut to a
+  // server cap rather than mapped whole, or a Nemotron Parse pass that
+  // fell short. Empty when nothing was lost.
   repeated PageWarning warnings = 3;
 }
 
 // One place a converted page is less than the model's answer, reported
 // beside its fragment.
 message PageWarning {
-  // Which cap was hit.
+  // What fell short.
   PageWarningCode code = 1;
   // Human-readable detail with the numbers involved; never the sole
   // carrier of meaning.
@@ -273,7 +319,7 @@ message PageWarning {
   string ref = 3;
 }
 
-// What a page can lose to a server cap.
+// What a page can lose: to a server cap, or to a model call that failed.
 enum PageWarningCode {
   // Not set. Never emitted by the server.
   PAGE_WARNING_CODE_UNSPECIFIED = 0;
@@ -292,6 +338,10 @@ enum PageWarningCode {
   // page under common client message limits), or the page raster is
   // larger than the server decodes. Every PictureItem is still there.
   PAGE_WARNING_CODE_PICTURE_IMAGES_SKIPPED = 3;
+  // A Nemotron Parse double or triple pass fell short: the detection call
+  // or some region crop calls failed, or the raster could not be cropped.
+  // Those regions keep the page pass text; the message gives the counts.
+  PAGE_WARNING_CODE_NEMOTRON_PASS_INCOMPLETE = 4;
 }
 
 // Unmapped model output or a page failure.

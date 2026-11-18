@@ -364,6 +364,22 @@ VlmResult generate(const VlmCall& call) {
         if (call.top_logprobs > 0) {
             body["top_logprobs"] = call.top_logprobs;
         }
+        const VlmCall::Sampling& sampling = call.sampling;
+        if (sampling.temperature) {
+            body["temperature"] = *sampling.temperature;
+        }
+        if (sampling.top_p) {
+            body["top_p"] = *sampling.top_p;
+        }
+        if (sampling.top_k) {
+            body["top_k"] = *sampling.top_k;
+        }
+        if (sampling.repetition_penalty) {
+            body["repetition_penalty"] = *sampling.repetition_penalty;
+        }
+        if (sampling.skip_special_tokens) {
+            body["skip_special_tokens"] = *sampling.skip_special_tokens;
+        }
         payload = body.dump();
     }
     httplib::Headers headers;

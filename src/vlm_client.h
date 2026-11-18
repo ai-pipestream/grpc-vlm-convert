@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -34,6 +35,18 @@ struct VlmCall {
     // for endpoints that reject it; top_logprobs > 0 sends it regardless,
     // since alternates need it.
     bool logprobs = true;
+    // Sampling settings a model's own protocol asks for (Nemotron Parse's
+    // multi-pass stages set them); each unset one is left out of the
+    // request, so the endpoint's default applies.
+    struct Sampling {
+        std::optional<double> temperature;
+        std::optional<double> top_p;
+        std::optional<int> top_k;
+        // vLLM extensions to the OpenAI request.
+        std::optional<double> repetition_penalty;
+        std::optional<bool> skip_special_tokens;
+    };
+    Sampling sampling{};
     // PNG-encoded page raster, viewed rather than copied: the caller keeps
     // the bytes alive for the call (the service's worker owns the one copy
     // of each page).

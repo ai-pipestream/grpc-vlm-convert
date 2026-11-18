@@ -155,6 +155,43 @@ service rather than an oversight:
   flattened to text, and `field_*` form elements are walked as plain
   content.
 
+### Nemotron Parse double and triple pass
+
+`ConvertOptions.nemotron_parse` is docling's `NemotronParseOptions`. With
+the single pass (the default) a page is one call like every other format.
+With `NEMOTRON_PARSE_PASSES_DOUBLE` or `_TRIPLE` and the
+`nemotron_parse_v3_5` format, a page follows docling's `_predict_nemotron`:
+
+1. The page call, with docling's fullpage settings (temperature 0.2,
+   repetition penalty 1.05, top-k 50, top-p 1.0, 8744 tokens, special
+   tokens kept).
+2. Triple only: a detection call with the no-text prompt and 4096 tokens.
+   A failed detector crops nothing rather than falling back to a double
+   pass.
+3. Table and Chart regions (from the detector for triple, from the page
+   call otherwise; with `TRIPLE_REGIONS_UNION`, page regions the detector
+   missed are added) are cut from the raster with NVIDIA's margins
+   (12 px plus 4% of the region), at most 80 per page, through a JPEG
+   quality 95 round trip, and each is parsed on its own (temperature 0.1,
+   repetition penalty 1.0) in batches of `crop_batch_size`.
+4. A crop's blocks are mapped back to the page, and one replaces a page
+   block only when it has the same class, overlaps it by IoU 0.5, keeps a
+   table's column count, passes the strict grid or chart check, and shares
+   at least 65% of its text (difflib ratio). A valid crop block with no
+   page counterpart is inserted in reading order. The page block keeps its
+   position and box.
+
+The fragment's usage sums every call. It carries no logprobs or
+alternates, because the merged text is not text the model generated, so
+a multi-pass request with `top_logprobs` fails `INVALID_ARGUMENT`, as does
+a multi-pass request for any other format. A failed detection or crop
+call, or a raster that cannot be cropped, keeps the page pass text for
+those regions and adds `PAGE_WARNING_CODE_NEMOTRON_PASS_INCOMPLETE` with
+the counts; a crop the structure check refuses is the check working and
+is not reported. A page's crop calls run beside its page slot only on
+in-flight slots that are free right now, so `GRPC_VLM_MAX_INFLIGHT` still
+bounds the calls open on the endpoint.
+
 ### Size caps and page warnings
 
 Every mapper builds tables as a full rows × columns grid, so a model stuck
@@ -416,5 +453,10 @@ the other `stop: ["</doctag>", "<|end_of_text|>"]` with `max_tokens`
   `response_format_raw` selection, agreement, conflict and exact-name
   matching, MinerU2 `UNIMPLEMENTED` with no model call, and the
   `response_formats` advertisement.
+- Nemotron multi-pass (`nemotron-multipass-test`, `nemotron-passes-test`):
+  crop plans, grid and chart checks, remapping, merging and difflib's
+  ratio against values docling's own functions produced; the stage
+  settings, failed stages, batching, option checks, and the service path
+  against a fake endpoint, including the in-flight cap.
 - Golden: one real page against a live VLM endpoint, behind a flag, not
   CI default.

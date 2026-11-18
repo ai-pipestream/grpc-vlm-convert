@@ -140,7 +140,9 @@ add_library(vlm_core STATIC
   src/mapping/nemotron_syntax.cpp
   src/mapping/nemotron_multipass.cpp
   src/mapping/sequence_ratio.cpp
+  src/mapping/region_image.cpp
   src/mapping/doclang.cpp
+  src/service/nemotron_passes.cpp
   src/service/vlm_convert_service.cpp)
 target_include_directories(vlm_core PUBLIC src)
 # stb headers as SYSTEM: third-party warnings must not trip -Werror.
@@ -169,6 +171,7 @@ if(BUILD_TESTING)
     http-api-test
     markdown-mapper-test
     nemotron-multipass-test
+    nemotron-passes-test
     otsl-mapper-test
     vlm-client-test
     vlm-convert-service-test
