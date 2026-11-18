@@ -89,7 +89,8 @@ void verify_chart_structure_needs_one_header_and_a_rectangular_table() {
         {"<chart type=\"bar\">\r| x | y |\v| 1 | 2 |\u2028| 3 | 4 |\n</chart>", true},
     };
     for (const Case& c : cases) {
-        require(vlm::mapping::nemotron_valid_structure({.label = "Chart", .text = c.text}) == c.valid,
+        require(vlm::mapping::nemotron_valid_structure(
+                    {.label = "Chart", .x1 = 0, .y1 = 0, .x2 = 1, .y2 = 1, .text = c.text}) == c.valid,
                 "chart structure of " + c.text);
     }
 }

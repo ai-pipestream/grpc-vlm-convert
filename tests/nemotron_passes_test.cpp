@@ -66,6 +66,18 @@ vlm::VlmResult answer(std::string text, std::string finish = "stop") {
     return result;
 }
 
+vlm::VlmResult failure(std::string error) {
+    vlm::VlmResult result;
+    result.error = std::move(error);
+    return result;
+}
+
+vlm::VlmResult cut_short() {
+    vlm::VlmResult result;
+    result.cancelled = true;
+    return result;
+}
+
 // A CallBatch that answers each stage from the fields below and records
 // every batch it was handed.
 struct FakeStages {
@@ -155,7 +167,7 @@ void verify_failed_stages_keep_the_page() {
     }
     {
         FakeStages fake;
-        fake.detection = vlm::VlmResult{.ok = false, .error = "HTTP 503"};
+        fake.detection = failure("HTTP 503");
         const auto out =
             vlm::run_nemotron_passes(page_call(png), {.triple = true}, fake.runner());
         require(fake.batches.size() == 2 && out.result.text == kPageText,
@@ -165,7 +177,7 @@ void verify_failed_stages_keep_the_page() {
     }
     {
         FakeStages fake;
-        fake.crop = vlm::VlmResult{.ok = false, .error = "HTTP 500"};
+        fake.crop = failure("HTTP 500");
         const auto out = vlm::run_nemotron_passes(page_call(png), {}, fake.runner());
         require(out.result.text == kPageText && out.result.ok, "a failed crop keeps the page");
         require(out.shortfall == "1 of 1 region crops failed; those regions keep the page pass text",
@@ -173,7 +185,7 @@ void verify_failed_stages_keep_the_page() {
     }
     {
         FakeStages fake;
-        fake.crop = vlm::VlmResult{.cancelled = true};
+        fake.crop = cut_short();
         const auto out = vlm::run_nemotron_passes(page_call(png), {}, fake.runner());
         require(out.result.cancelled, "a cancelled crop cancels the page");
     }
