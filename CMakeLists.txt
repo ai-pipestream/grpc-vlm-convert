@@ -137,6 +137,9 @@ add_library(vlm_core STATIC
   src/mapping/chandra.cpp
   src/mapping/dots.cpp
   src/mapping/nemotron.cpp
+  src/mapping/nemotron_syntax.cpp
+  src/mapping/nemotron_multipass.cpp
+  src/mapping/sequence_ratio.cpp
   src/mapping/doclang.cpp
   src/service/vlm_convert_service.cpp)
 target_include_directories(vlm_core PUBLIC src)
@@ -165,6 +168,7 @@ if(BUILD_TESTING)
     doctags-mapper-test
     http-api-test
     markdown-mapper-test
+    nemotron-multipass-test
     otsl-mapper-test
     vlm-client-test
     vlm-convert-service-test
