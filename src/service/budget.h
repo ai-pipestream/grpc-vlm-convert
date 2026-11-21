@@ -31,6 +31,10 @@ class Budget {
     // turns true first, the returned lease is empty.
     Lease acquire(size_t amount, const std::function<bool()>& halted);
 
+    // Takes `amount` (clamped like acquire) now when it fits and nobody is
+    // waiting; an empty lease otherwise. It never jumps the line.
+    Lease try_acquire(size_t amount);
+
     size_t capacity() const { return capacity_; }
 
     // What is taken right now (tests and diagnostics).
@@ -116,6 +120,16 @@ inline Lease Budget::acquire(size_t amount, const std::function<bool()>& halted)
         }
         changed_.wait_for(lock, kPollInterval);
     }
+}
+
+inline Lease Budget::try_acquire(size_t amount) {
+    amount = std::clamp<size_t>(amount, 1, capacity_);
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!line_.empty() || used_ + amount > capacity_) {
+        return Lease();
+    }
+    used_ += amount;
+    return Lease(this, amount);
 }
 
 }  // namespace vlm
