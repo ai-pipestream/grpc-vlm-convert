@@ -1,0 +1,48 @@
+# Qwen2.5-VL-7B on llama.cpp's SYCL backend for an Intel Arc / Battlemage
+# host (krick-1's B70). This replaces the hand-run `vlm-server` container:
+#
+#   docker compose -f serving/llama-vlm-intel/compose.yaml up -d
+#   sh serving/llama-vlm-intel/check-gpu.sh          # must pass before use
+#
+# What is pinned, and why:
+#   - the image by digest, so a re-pull cannot change the runtime under us;
+#   - --device SYCL0, so llama.cpp cannot choose CPU when SYCL finds no GPU
+#     (an unknown device name is a startup error);
+#   - -ngl 99 offloads every layer; check-gpu.sh reads the load log and
+#     fails unless all layers and the vision projector are on SYCL0;
+#   - -lv 3 keeps the info lines (offload count, buffer sizes) that the
+#     check reads; the image's default verbosity hides them.
+#
+# The port is published on 127.0.0.1 only. To serve other hosts set
+# VLM_PUBLISH_ADDRESS (0.0.0.0 or one interface's address), and put a key
+# in front of it (llama-server reads LLAMA_API_KEY) once the clients send one.
+services:
+  vlm-server:
+    image: ghcr.io/ggml-org/llama.cpp@sha256:9555920f49faed298614a85fbcc1027bb6762837d5beb8e4c198725e95ebb471
+    container_name: vlm-server
+    command:
+      - -hf
+      - ggml-org/Qwen2.5-VL-7B-Instruct-GGUF:Q4_K_M
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --device
+      - SYCL0
+      - -ngl
+      - "99"
+      - -c
+      - "8192"
+      - -lv
+      - "3"
+    ports: ["${VLM_PUBLISH_ADDRESS:-127.0.0.1}:8085:8080"]
+    devices: ["/dev/dri:/dev/dri"]
+    volumes:
+      - ${VLM_MODELS_DIR:-${HOME}/llama-models}:/root/.cache/llama.cpp
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 300s
+      retries: 3
+    restart: unless-stopped
