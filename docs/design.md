@@ -82,6 +82,26 @@ Events arrive in completion order, not page order:
    call or the mapping failed.
 3. `ConvertComplete`: pages started / ok / failed.
 
+A `PageDocument` with no items is never a silent result. Every
+`PageDocument` and every `PageRaw` whose model call succeeded carries the
+call's `generation` (model, endpoint origin, stop reason, token cost), so a
+page with no item to hold it still says how its answer ended. For the
+layout formats (dots.ocr, Nemotron Parse, DocLang, Chandra) an answer that
+maps to no items is one of three things:
+
+- the model returned no text: an empty fragment with
+  `PAGE_WARNING_CODE_EMPTY_RESPONSE`;
+- the model declared the page empty in its format's own terms (dots.ocr
+  `[]`, `<doclang></doclang>`, a Chandra `Blank-Page` block): an empty
+  fragment, no warning;
+- anything else (prose, a refusal, JSON cut off beyond repair, elements
+  the mapper builds nothing from): a mapping failure, so the page is a
+  `PageRaw` with the model's text and the reason, counted in
+  `pages_failed`.
+
+Docling degrades the third case to an empty page. This server does not,
+because a blank page that reads as converted hides the loss.
+
 A UI paints `PageDocument` immediately. gRParse merges fragments with
 the same additive rules as other collectors; it must not hold page 4
 until page 3 arrives.

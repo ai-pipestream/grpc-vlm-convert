@@ -586,7 +586,7 @@ bool map_nemotron_parse_v2(const std::string& text, const PageContext& page,
         }
         w.set_orig(item, raw);
     }
-    return w.finish(error, "Nemotron Parse", /*allow_empty=*/true);
+    return w.finish(error, "Nemotron Parse", blank_reply_or_failure(text));
 }
 
 bool map_nemotron_parse_v3_5(const std::string& text, const PageContext& page,
@@ -680,7 +680,7 @@ bool map_nemotron_parse_v3_5(const std::string& text, const PageContext& page,
         }
     }
     w.link_adjacent_captions(starts, caption_blocks);
-    return w.finish(error, "Nemotron Parse 3.5", /*allow_empty=*/true);
+    return w.finish(error, "Nemotron Parse 3.5", blank_reply_or_failure(text));
 }
 
 }  // namespace vlm::mapping

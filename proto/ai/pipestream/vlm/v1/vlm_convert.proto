@@ -306,6 +306,11 @@ message PageDocument {
   // server cap rather than mapped whole, or a Nemotron Parse pass that
   // fell short. Empty when nothing was lost.
   repeated PageWarning warnings = 3;
+  // The model call that produced this page: the model that answered, the
+  // endpoint origin, the stop reason verbatim and classified, the token
+  // cost. The same value rides every item's source list; it is repeated
+  // here so a fragment with no items still says how its answer ended.
+  ai.pipestream.document.v1.GenerationSource generation = 4;
 }
 
 // One place a converted page is less than the model's answer, reported
@@ -344,6 +349,11 @@ enum PageWarningCode {
   // or some region crop calls failed, or the raster could not be cropped.
   // Those regions keep the page pass text; the message gives the counts.
   PAGE_WARNING_CODE_NEMOTRON_PASS_INCOMPLETE = 4;
+  // The model returned no text at all for the page, so the fragment has no
+  // items. A model that answers with its format's own empty layout (dots.ocr
+  // "[]", a Chandra Blank-Page block) declared the page empty and raises no
+  // warning; an answer with text that maps to no items is a PageRaw.
+  PAGE_WARNING_CODE_EMPTY_RESPONSE = 5;
 }
 
 // Unmapped model output or a page failure.
@@ -356,6 +366,11 @@ message PageRaw {
   // What went wrong, when this event reports a failure (endpoint error,
   // or the mapping failure reason alongside text). Empty when unset.
   string error = 3;
+  // The model call behind text, when the call succeeded but mapping failed:
+  // a stop reason of VLM_STOP_REASON_LENGTH says the answer was cut off,
+  // which is the usual reason it no longer parses. Unset on endpoint
+  // failure.
+  ai.pipestream.document.v1.GenerationSource generation = 4;
 }
 
 // Trailer summarizing the finished conversion.

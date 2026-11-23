@@ -188,6 +188,85 @@ void verify_dots_json() {
             "dots: an empty layout is an empty page: " + error);
 }
 
+// A layout answer that maps to no items is never a converted blank page
+// unless the model said the page is blank. The text of an answer the
+// mapper could not use goes back as PageRaw, so nothing the model wrote is
+// thrown away behind an OK.
+void verify_an_unusable_layout_answer_is_a_mapping_failure() {
+    struct Case {
+        vlmv1::ResponseFormat format;
+        std::string text;
+    };
+    const std::vector<Case> unusable = {
+        // Prose or a refusal instead of the layout.
+        {vlmv1::RESPONSE_FORMAT_DOTS_JSON, "I cannot read this page."},
+        // JSON cut off beyond repair, as an answer stopped at max_tokens is.
+        {vlmv1::RESPONSE_FORMAT_DOTS_JSON, "[{\"bbox\": [1, 2"},
+        // Valid JSON that is not a layout.
+        {vlmv1::RESPONSE_FORMAT_DOTS_JSON, "{\"a\": 1}"},
+        // A layout whose only element is one the mapper has no item for.
+        {vlmv1::RESPONSE_FORMAT_DOTS_JSON,
+         "[{\"category\": \"Mystery\", \"text\": \"lost words\"}]"},
+        {vlmv1::RESPONSE_FORMAT_NEMOTRON_PARSE_V2, "Sorry, I cannot help with that."},
+        {vlmv1::RESPONSE_FORMAT_NEMOTRON_PARSE_V3_5, "Sorry, I cannot help with that."},
+        {vlmv1::RESPONSE_FORMAT_DOCLANG, "<doclang>stray words</doclang>"},
+        {vlmv1::RESPONSE_FORMAT_DOCLANG, "<doclang><mystery>lost words</mystery></doclang>"},
+    };
+    for (const Case& c : unusable) {
+        docv1::Document doc;
+        std::string error;
+        std::vector<vlmv1::PageWarning> warnings;
+        const std::string name = vlmv1::ResponseFormat_Name(c.format) + " <" + c.text + ">";
+        require(!vlm::mapping::map_response(c.format, c.text, page_context(), &doc, &error,
+                                            &warnings),
+                name + ": an answer that maps to no items is a mapping failure");
+        require(!error.empty(), name + ": the failure says why");
+    }
+
+    // The model returned nothing at all: an empty fragment, and a typed
+    // warning saying so.
+    for (const vlmv1::ResponseFormat format :
+         {vlmv1::RESPONSE_FORMAT_DOTS_JSON, vlmv1::RESPONSE_FORMAT_NEMOTRON_PARSE_V2,
+          vlmv1::RESPONSE_FORMAT_NEMOTRON_PARSE_V3_5, vlmv1::RESPONSE_FORMAT_CHANDRA_HTML}) {
+        for (const std::string& blank : {std::string(), std::string("  \n")}) {
+            docv1::Document doc;
+            std::string error;
+            std::vector<vlmv1::PageWarning> warnings;
+            const std::string name = vlmv1::ResponseFormat_Name(format);
+            require(vlm::mapping::map_response(format, blank, page_context(), &doc, &error,
+                                               &warnings),
+                    name + ": a blank answer is an empty page: " + error);
+            require(doc.texts_size() == 0 && doc.pictures_size() == 0 && doc.tables_size() == 0,
+                    name + ": a blank answer has no items");
+            require(warnings.size() == 1 &&
+                        warnings[0].code() == vlmv1::PAGE_WARNING_CODE_EMPTY_RESPONSE &&
+                        warnings[0].ref().empty(),
+                    name + ": a blank answer carries the empty-response warning");
+        }
+    }
+
+    // The model declared the page empty in its format's own terms: an
+    // empty fragment and nothing to warn about.
+    const std::vector<Case> declared_empty = {
+        {vlmv1::RESPONSE_FORMAT_DOTS_JSON, "[]"},
+        {vlmv1::RESPONSE_FORMAT_DOTS_JSON, "```json\n[]\n```"},
+        {vlmv1::RESPONSE_FORMAT_DOCLANG, "<doclang></doclang>"},
+        {vlmv1::RESPONSE_FORMAT_DOCLANG, "<doclang>\n</doclang>"},
+        {vlmv1::RESPONSE_FORMAT_CHANDRA_HTML, "<div data-label=\"Blank-Page\"></div>"},
+    };
+    for (const Case& c : declared_empty) {
+        docv1::Document doc;
+        std::string error;
+        std::vector<vlmv1::PageWarning> warnings;
+        const std::string name = vlmv1::ResponseFormat_Name(c.format) + " <" + c.text + ">";
+        require(vlm::mapping::map_response(c.format, c.text, page_context(), &doc, &error,
+                                           &warnings),
+                name + ": a declared empty layout is an empty page: " + error);
+        require(doc.texts_size() == 0 && warnings.empty(),
+                name + ": a declared empty layout has no items and no warning");
+    }
+}
+
 // test_nemotron_parse_v2.py::test_extract_nemotron_parse_v2_multiline_regions
 void verify_nemotron_parse_v2() {
     const docv1::Document doc = map_or_fail(
@@ -354,6 +433,7 @@ int main() {
         verify_unlimited_ocr_markdown();
         verify_chandra_html();
         verify_dots_json();
+        verify_an_unusable_layout_answer_is_a_mapping_failure();
         verify_nemotron_parse_v2();
         verify_nemotron_parse_v3_5();
         verify_doclang();

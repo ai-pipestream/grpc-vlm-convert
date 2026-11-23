@@ -12,6 +12,7 @@
 // rich table cells (a cell's elements are flattened to text), and the
 // field_* form vocabulary (walked as plain content).
 
+#include <algorithm>
 #include <cctype>
 #include <charconv>
 #include <optional>
@@ -969,7 +970,15 @@ bool map_doclang(const std::string& text, const PageContext& page, docv1::Docume
     DocLangBuilder builder(w, page, out);
     builder.set_resolution(*root);
     builder.walk_root(*root);
-    return w.finish(error, "DocLang", /*allow_empty=*/true);
+    // "<doclang></doclang>" is the model declaring a page with nothing on
+    // it. A root that holds text or elements the walk built no item from
+    // is an answer the mapper could not use.
+    const bool declared_empty =
+        std::all_of(root->children.begin(), root->children.end(), [](const auto& child) {
+            return child->is_text() && trim(child->text).empty();
+        });
+    return w.finish(error, "DocLang",
+                    declared_empty ? EmptyPage::kDeclaredEmpty : EmptyPage::kMappingFailure);
 }
 
 }  // namespace vlm::mapping
