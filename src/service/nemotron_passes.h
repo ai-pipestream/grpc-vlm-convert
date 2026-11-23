@@ -34,6 +34,14 @@ std::optional<NemotronPasses> nemotron_passes_for(
     const ai::pipestream::vlm::v1::ConvertOptions& options,
     ai::pipestream::vlm::v1::ResponseFormat format, std::string* error);
 
+// docling's single page call for Nemotron Parse 3.5 through an API
+// engine (the nemotron_parse_v3_5 preset's api_overrides): greedy decoding
+// with top-k 1, repetition penalty 1.1, special tokens kept and 8744
+// tokens. Without a prompt in the request the page gets docling's page
+// prompt. Every Nemotron Parse 3.5 page starts from this call; a double or
+// triple pass then sets each stage's own sampling.
+void apply_nemotron_page_settings(VlmCall* call, bool prompt_given);
+
 // Runs every call and returns their results in the same order.
 using CallBatch = std::function<std::vector<VlmResult>(const std::vector<VlmCall>&)>;
 

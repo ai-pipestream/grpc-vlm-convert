@@ -20,6 +20,11 @@
 
 namespace vlm::mapping {
 
+// docling's Nemotron Parse 3.5 page prompt: boxes, classes and markdown
+// text, including text inside pictures.
+inline constexpr std::string_view kNemotronPagePrompt =
+    "</s><s><predict_bbox><predict_classes><output_markdown><predict_text_in_pic>";
+
 // The detection pass prompt: boxes and classes, no text.
 inline constexpr std::string_view kNemotronDetectPrompt =
     "</s><s><predict_bbox><predict_classes><output_no_text><predict_no_text_in_pic>";
