@@ -4,6 +4,11 @@
 // after Qwen2-VL resizing, rescaled to the page. Text is Markdown with
 // inline HTML; tables are HTML; a fenced block is code.
 //
+// Docling skips an element without a usable bbox and cuts an unfinished
+// tail off silently. This mapper keeps such an element's text on the
+// full-page box and reports every entry and byte it reads past as a typed
+// PageWarning.
+//
 // Docling degrades malformed output to an empty page. This mapper does
 // not: an answer that is prose, a refusal, JSON broken beyond repair, or a
 // layout of elements it builds nothing from is a mapping failure, so the
@@ -27,8 +32,10 @@ using Ref = LayoutWriter::Ref;
 using Box = std::optional<docv1::BoundingBox>;
 
 // _clean_json: keep from the first '['; a truncated array is cut after
-// its last complete object and closed.
-std::string clean_json(const std::string& raw) {
+// its last complete object and closed. `dropped` is how many bytes of an
+// unfinished element that cut away (a separator alone is not content).
+std::string clean_json(const std::string& raw, size_t* dropped) {
+    *dropped = 0;
     const size_t open = raw.find('[');
     if (open == std::string::npos) {
         return "[]";
@@ -42,6 +49,15 @@ std::string clean_json(const std::string& raw) {
         const size_t brace = text.rfind('}', end == 0 ? 0 : end - 1);
         if (brace == std::string::npos) {
             return "[]";
+        }
+        for (size_t at = brace + 1; at < end; at++) {
+            const auto c = static_cast<unsigned char>(text[at]);
+            // A separator, the closing bracket and a code fence after it
+            // are the array's own punctuation, not an element.
+            if (std::isspace(c) == 0 && c != ',' && c != ']' && c != '`') {
+                *dropped = end - at;
+                break;
+            }
         }
         return text.substr(0, brace + 1) + "]";
     }
@@ -163,11 +179,17 @@ bool map_dots_json(const std::string& text, const PageContext& page, docv1::Docu
     if (trim(text).empty()) {
         return w.finish(error, "dots.ocr", EmptyPage::kBlankReply);
     }
-    const nlohmann::json elements = nlohmann::json::parse(clean_json(text), nullptr, false);
+    size_t dropped_tail = 0;
+    const nlohmann::json elements =
+        nlohmann::json::parse(clean_json(text, &dropped_tail), nullptr, false);
     if (elements.is_discarded() || !elements.is_array()) {
         *error = "dots.ocr response is not a JSON array of layout elements";
         return false;
     }
+    // What the mapper reads past, reported beside the fragment: entries it
+    // builds nothing from, and elements kept without their own box.
+    size_t skipped = 0;
+    size_t unplaced = 0;
     // Boxes are on the Qwen2-VL input grid of the page raster.
     const auto [model_w, model_h] = qwen2vl_image_size(page.width, page.height);
     const double sx = model_w > 0 ? page.width / model_w : 1.0;
@@ -180,6 +202,7 @@ bool map_dots_json(const std::string& text, const PageContext& page, docv1::Docu
         starts.push_back(w.body_size());
         const nlohmann::json& element = elements[index];
         if (!element.is_object()) {
+            skipped++;
             continue;
         }
         const std::string category = element.contains("category") &&
@@ -192,22 +215,30 @@ bool map_dots_json(const std::string& text, const PageContext& page, docv1::Docu
         const std::string body = element.contains("text") && element["text"].is_string()
                                      ? element["text"].get<std::string>()
                                      : "";
-        if (!element.contains("bbox") || !element["bbox"].is_array() ||
-            element["bbox"].size() != 4) {
-            continue;
-        }
+        // docling skips an element whose bbox is missing or is not four
+        // finite numbers. One with text is kept here instead, on the
+        // full-page box, and counted: its words are the page's content. One
+        // with no text has nothing to keep.
         std::vector<double> coords;
-        for (const nlohmann::json& value : element["bbox"]) {
-            const std::optional<double> number = python_float(value);
-            if (!number || !std::isfinite(*number)) {
-                break;
+        if (element.contains("bbox") && element["bbox"].is_array() &&
+            element["bbox"].size() == 4) {
+            for (const nlohmann::json& value : element["bbox"]) {
+                const std::optional<double> number = python_float(value);
+                if (!number || !std::isfinite(*number)) {
+                    break;
+                }
+                coords.push_back(*number);
             }
-            coords.push_back(*number);
         }
-        if (coords.size() != 4) {
+        Box box;
+        if (coords.size() == 4) {
+            box = w.scaled_box(coords[0], coords[1], coords[2], coords[3], sx, sy);
+        } else if (trim(body).empty()) {
+            skipped++;
             continue;
+        } else {
+            unplaced++;
         }
-        const Box box = w.scaled_box(coords[0], coords[1], coords[2], coords[3], sx, sy);
         const docv1::DocItemLabel label =
             category_label(category).value_or(docv1::DOC_ITEM_LABEL_TEXT);
 
@@ -250,6 +281,26 @@ bool map_dots_json(const std::string& text, const PageContext& page, docv1::Docu
         }
     }
     w.link_adjacent_captions(starts, caption_blocks, /*code_owners=*/true);
+    if (dropped_tail > 0) {
+        add_warning(warnings, vlmv1::PAGE_WARNING_CODE_OUTPUT_TRUNCATED,
+                    "the layout array breaks off inside an element; the last " +
+                        std::to_string(dropped_tail) + " byte(s) of the answer were not mapped",
+                    "");
+    }
+    if (skipped > 0) {
+        add_warning(warnings, vlmv1::PAGE_WARNING_CODE_ELEMENTS_SKIPPED,
+                    std::to_string(skipped) + " of " + std::to_string(elements.size()) +
+                        " layout entries were not mapped: not an element object, or an "
+                        "element with neither a usable bbox nor text",
+                    "");
+    }
+    if (unplaced > 0) {
+        add_warning(warnings, vlmv1::PAGE_WARNING_CODE_LOCATION_UNREADABLE,
+                    std::to_string(unplaced) +
+                        " element(s) whose bbox is missing or is not four numbers keep their "
+                        "text on the full-page box",
+                    "");
+    }
     return w.finish(error, "dots.ocr",
                     declares_empty_layout(text) ? EmptyPage::kDeclaredEmpty
                                                 : EmptyPage::kMappingFailure);

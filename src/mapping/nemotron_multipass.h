@@ -16,9 +16,17 @@
 #include <string_view>
 #include <vector>
 
+#include "ai/pipestream/vlm/v1/vlm_convert.pb.h"
 #include "nemotron_syntax.h"
 
 namespace vlm::mapping {
+
+// Adds the page warnings for what a Nemotron Parse 3.5 answer held outside
+// its well-formed blocks: PAGE_WARNING_CODE_ELEMENTS_SKIPPED for blocks
+// without corners, PAGE_WARNING_CODE_OUTPUT_TRUNCATED for an unfinished
+// last block. Nothing is added when `unread` is empty or `warnings` null.
+void report_nemotron_unread(const NemotronUnread& unread,
+                            std::vector<ai::pipestream::vlm::v1::PageWarning>* warnings);
 
 // docling's Nemotron Parse 3.5 page prompt: boxes, classes and markdown
 // text, including text inside pictures.
@@ -48,11 +56,12 @@ std::vector<NemotronBlock> nemotron_structural_regions(std::string_view content)
 // from `detection` when it is set (triple pass) and from `parser`
 // otherwise; with `union_regions`, parser regions the detector missed are
 // added. Near-duplicates of the same class are dropped and crops under
-// 8 pixels on a side are skipped.
+// 8 pixels on a side are skipped. At most kMaxNemotronCrops regions are
+// planned; `over_cap`, when given, receives how many more there were.
 std::vector<NemotronCrop> plan_nemotron_crops(int64_t width, int64_t height,
                                               std::string_view parser,
                                               const std::string* detection,
-                                              bool union_regions);
+                                              bool union_regions, size_t* over_cap = nullptr);
 
 // The column count of a LaTeX tabular whose grid is complete and
 // consistent (spans, multirow placeholders); nullopt otherwise.

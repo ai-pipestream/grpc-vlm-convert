@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <format>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -231,6 +232,53 @@ void verify_crops_go_in_batches() {
     vlm::run_nemotron_passes(page_call(png), {.crop_batch_size = 2}, fake.runner());
     require(fake.batches.size() == 3 && fake.batches[1].size() == 2 && fake.batches[2].size() == 1,
             "three crops in batches of two");
+}
+
+// Regions past the crop cap keep their page pass text. That is the pass
+// falling short for them, so the page says how many.
+void verify_regions_past_the_crop_cap_are_reported() {
+    const std::string png = gray_png(1000, 800);
+    std::string page;
+    size_t regions = 0;
+    for (int row = 0; row < 9 && regions < 85; row++) {
+        for (int col = 0; col < 10 && regions < 85; col++, regions++) {
+            const auto at = [](double v) { return std::format("{:.2f}", v); };
+            page += "<x_" + at(0.02 + col * 0.09) + "><y_" + at(0.02 + row * 0.1) + ">" +
+                    kPageTable + "<x_" + at(0.07 + col * 0.09) + "><y_" + at(0.07 + row * 0.1) +
+                    "><class_Table>\n";
+        }
+    }
+    FakeStages fake;
+    fake.page = answer(page);
+    const auto out =
+        vlm::run_nemotron_passes(page_call(png), {.crop_batch_size = 80}, fake.runner());
+    require(fake.crop_sizes.size() == vlm::mapping::kMaxNemotronCrops,
+            "85 regions: the crop cap holds at 80, got " +
+                std::to_string(fake.crop_sizes.size()));
+    require(out.shortfall.contains("5 ") && out.shortfall.contains("crop cap"),
+            "the five regions past the cap are reported: " + out.shortfall);
+
+    FakeStages within;
+    const auto whole = vlm::run_nemotron_passes(page_call(png), {}, within.runner());
+    require(whole.shortfall.empty(), "a page within the cap reports nothing");
+}
+
+// The merged text is rebuilt from the page's well-formed blocks, so what
+// the page call wrote outside them is gone before the mapper sees it. The
+// pass reports that loss itself.
+void verify_merge_reports_what_it_reads_past() {
+    const std::string png = gray_png(1000, 800);
+    FakeStages fake;
+    fake.page = answer(kPageText + "\nwords with no corners<class_Text>");
+    const auto out = vlm::run_nemotron_passes(page_call(png), {}, fake.runner());
+    require(out.result.text == kMergedText, "the crop's table is merged in");
+    require(out.warnings.size() == 1 &&
+                out.warnings[0].code() == vlmv1::PAGE_WARNING_CODE_ELEMENTS_SKIPPED,
+            "the block the merge dropped is reported");
+
+    FakeStages clean;
+    const auto whole = vlm::run_nemotron_passes(page_call(png), {}, clean.runner());
+    require(whole.warnings.empty(), "a well-formed page reports nothing");
 }
 
 void verify_options() {
@@ -483,6 +531,8 @@ int main() {
         verify_triple_pass_crops_the_detected_regions();
         verify_failed_stages_keep_the_page();
         verify_crops_go_in_batches();
+        verify_regions_past_the_crop_cap_are_reported();
+        verify_merge_reports_what_it_reads_past();
         verify_options();
         verify_service_runs_the_passes();
         verify_crops_stay_within_the_inflight_cap();

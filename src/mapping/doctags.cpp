@@ -775,6 +775,26 @@ bool emit_inline_group(const std::string& chunk, const PageContext& page,
     return true;
 }
 
+// How many `<prefixN>` tokens in `text` carry an N that std::stol refuses
+// (the parsers below skip those): `<loc_abc>`, `<link_>`, a number past
+// the range of long.
+size_t unreadable_tokens(const std::string& text, std::string_view prefix) {
+    size_t count = 0;
+    for (size_t open = text.find(prefix); open != std::string::npos;
+         open = text.find(prefix, open + 1)) {
+        const size_t gt = text.find('>', open);
+        if (gt == std::string::npos) {
+            break;
+        }
+        try {
+            (void)std::stol(text.substr(open + prefix.size(), gt - open - prefix.size()));
+        } catch (...) {
+            count++;
+        }
+    }
+    return count;
+}
+
 }  // namespace
 
 bool map_doctags(const std::string& text, const PageContext& page, docv1::Document* out,
@@ -939,6 +959,23 @@ bool map_doctags(const std::string& text, const PageContext& page, docv1::Docume
     if (items == 0) {
         *error = "DocTags response produced no document items";
         return false;
+    }
+    // The tokenizers skip a location or link token whose number does not
+    // parse. The item is still built, without what the token said, so the
+    // page reports it.
+    if (const size_t bad = unreadable_tokens(text, "<loc_"); bad > 0) {
+        add_warning(warnings, vlmv1::PAGE_WARNING_CODE_LOCATION_UNREADABLE,
+                    std::to_string(bad) +
+                        " <loc_> token(s) are not numbers; an item left with fewer than four "
+                        "locations sits on the full-page box",
+                    "");
+    }
+    if (const size_t bad = unreadable_tokens(text, "<link_"); bad > 0) {
+        add_warning(warnings, vlmv1::PAGE_WARNING_CODE_ELEMENTS_SKIPPED,
+                    std::to_string(bad) +
+                        " <link_> token(s) do not name a cell number; those key-value links "
+                        "were not mapped",
+                    "");
     }
     if (state.crops_over_budget > 0) {
         const CropBudget& budget = page.crops;

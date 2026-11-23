@@ -205,8 +205,7 @@ void verify_an_unusable_layout_answer_is_a_mapping_failure() {
         // Valid JSON that is not a layout.
         {vlmv1::RESPONSE_FORMAT_DOTS_JSON, "{\"a\": 1}"},
         // A layout whose only element is one the mapper has no item for.
-        {vlmv1::RESPONSE_FORMAT_DOTS_JSON,
-         "[{\"category\": \"Mystery\", \"text\": \"lost words\"}]"},
+        {vlmv1::RESPONSE_FORMAT_DOTS_JSON, "[{\"category\": \"Picture\"}]"},
         {vlmv1::RESPONSE_FORMAT_NEMOTRON_PARSE_V2, "Sorry, I cannot help with that."},
         {vlmv1::RESPONSE_FORMAT_NEMOTRON_PARSE_V3_5, "Sorry, I cannot help with that."},
         {vlmv1::RESPONSE_FORMAT_DOCLANG, "<doclang>stray words</doclang>"},
@@ -286,6 +285,135 @@ std::string v35_block(const std::string& label, const std::string& body,
                       const std::string& x2 = "0.9", const std::string& y2 = "0.2") {
     return "<x_" + x1 + "><y_" + y1 + ">" + body + "<x_" + x2 + "><y_" + y2 + "><class_" + label +
            ">\n\n";
+}
+
+// The warnings of one code among `warnings`.
+std::vector<vlmv1::PageWarning> warnings_of(const std::vector<vlmv1::PageWarning>& warnings,
+                                            vlmv1::PageWarningCode code) {
+    std::vector<vlmv1::PageWarning> out;
+    for (const vlmv1::PageWarning& warning : warnings) {
+        if (warning.code() == code) {
+            out.push_back(warning);
+        }
+    }
+    return out;
+}
+
+// What a mapper reads past without building an item from it is reported
+// beside the fragment as a typed warning: an answer that breaks off inside
+// its own layout, an element the mapper could not read, a location it
+// could not read. A page with none of these carries no such warning.
+void verify_dropped_content_is_reported() {
+    const auto map = [](vlmv1::ResponseFormat format, const std::string& text,
+                        std::vector<vlmv1::PageWarning>* warnings) {
+        docv1::Document doc;
+        std::string error;
+        require(vlm::mapping::map_response(format, text, page_context(), &doc, &error, warnings),
+                vlmv1::ResponseFormat_Name(format) + " maps: " + error);
+        return doc;
+    };
+    const std::string kDotsTitle =
+        "{\"bbox\": [10, 10, 200, 40], \"category\": \"Title\", \"text\": \"# Kept\"}";
+
+    {
+        // dots.ocr: the array breaks off inside its second element.
+        std::vector<vlmv1::PageWarning> warnings;
+        const docv1::Document doc =
+            map(vlmv1::RESPONSE_FORMAT_DOTS_JSON,
+                "[" + kDotsTitle + ", {\"bbox\": [10, 50, 200, 90], \"category\": \"Text\", "
+                "\"text\": \"words the answer never fin",
+                &warnings);
+        require(doc.texts_size() == 1 && base(doc.texts(0)).text() == "Kept",
+                "dots: the complete element of a cut array is kept");
+        require(warnings.size() == 1 &&
+                    warnings[0].code() == vlmv1::PAGE_WARNING_CODE_OUTPUT_TRUNCATED &&
+                    warnings[0].ref().empty() && !warnings[0].message().empty(),
+                "dots: a cut array reports the tail it dropped");
+    }
+    {
+        // dots.ocr: a closed array, and one cut cleanly between elements,
+        // dropped nothing.
+        for (const std::string& text :
+             {"[" + kDotsTitle + "]", "```json\n[" + kDotsTitle + "]\n```",
+              "[" + kDotsTitle + ",\n"}) {
+            std::vector<vlmv1::PageWarning> warnings;
+            map(vlmv1::RESPONSE_FORMAT_DOTS_JSON, text, &warnings);
+            require(warnings.empty(), "dots: nothing dropped, nothing reported <" + text + ">");
+        }
+    }
+    {
+        // dots.ocr: an element with text and no usable box keeps its text
+        // on the full-page box; entries the mapper builds nothing from are
+        // counted.
+        std::vector<vlmv1::PageWarning> warnings;
+        const docv1::Document doc =
+            map(vlmv1::RESPONSE_FORMAT_DOTS_JSON,
+                "[" + kDotsTitle +
+                    ", {\"category\": \"Text\", \"text\": \"no box at all\"}"
+                    ", {\"bbox\": [1, 2, 3], \"category\": \"Section-header\", "
+                    "\"text\": \"## three numbers\"}"
+                    ", \"a stray string\""
+                    ", {\"bbox\": [\"x\", 2, 3, 4], \"category\": \"Picture\"}]",
+                &warnings);
+        require(doc.texts_size() == 3, "dots: both box-less elements keep their text: " +
+                                           std::to_string(doc.texts_size()));
+        const docv1::TextItemBase* unplaced = find_text(doc, "no box at all");
+        require(unplaced != nullptr && near(unplaced->prov(0).bbox().l(), 0) &&
+                    near(unplaced->prov(0).bbox().r(), 1000) &&
+                    near(unplaced->prov(0).bbox().b(), 1000),
+                "dots: a box-less element sits on the full-page box");
+        require(find_text(doc, "three numbers") != nullptr,
+                "dots: a heading with a three-number box keeps its text");
+        const auto unreadable =
+            warnings_of(warnings, vlmv1::PAGE_WARNING_CODE_LOCATION_UNREADABLE);
+        require(unreadable.size() == 1 && unreadable[0].message().starts_with("2 "),
+                "dots: two elements kept without a readable location");
+        const auto skipped = warnings_of(warnings, vlmv1::PAGE_WARNING_CODE_ELEMENTS_SKIPPED);
+        require(skipped.size() == 1 && skipped[0].message().starts_with("2 "),
+                "dots: the stray string and the box-less picture are counted as skipped");
+        require(warnings.size() == 2, "dots: exactly those two warnings");
+    }
+    {
+        // Nemotron Parse 3.5: a block with text and no corners, and text
+        // after the last class token (a block the answer broke off in).
+        std::vector<vlmv1::PageWarning> warnings;
+        const docv1::Document doc =
+            map(vlmv1::RESPONSE_FORMAT_NEMOTRON_PARSE_V3_5,
+                v35_block("Text", "kept") + "words with no corners<class_Text>\n\n" +
+                    "<x_0.1><y_0.5>a block the answer never clo",
+                &warnings);
+        require(doc.texts_size() == 1 && base(doc.texts(0)).text() == "kept",
+                "nemotron v3.5: the well-formed block maps");
+        const auto skipped = warnings_of(warnings, vlmv1::PAGE_WARNING_CODE_ELEMENTS_SKIPPED);
+        require(skipped.size() == 1 && skipped[0].message().starts_with("1 "),
+                "nemotron v3.5: the block without corners is counted");
+        const auto cut = warnings_of(warnings, vlmv1::PAGE_WARNING_CODE_OUTPUT_TRUNCATED);
+        require(cut.size() == 1, "nemotron v3.5: the unfinished last block is reported");
+        require(warnings.size() == 2, "nemotron v3.5: exactly those two warnings");
+
+        std::vector<vlmv1::PageWarning> clean;
+        map(vlmv1::RESPONSE_FORMAT_NEMOTRON_PARSE_V3_5,
+            "</s>" + v35_block("Text", "kept") + "<x_0.5><y_0.5><class_Text>\n", &clean);
+        require(clean.empty(), "nemotron v3.5: a stray class token with no text loses nothing");
+    }
+    {
+        // Nemotron Parse 2.0: the last region opens and never closes.
+        std::vector<vlmv1::PageWarning> warnings;
+        const docv1::Document doc =
+            map(vlmv1::RESPONSE_FORMAT_NEMOTRON_PARSE_V2,
+                "<x_0.1><y_0.1>kept<x_0.9><y_0.2><class_Text><x_0.1><y_0.3>cut off mid regi",
+                &warnings);
+        require(doc.texts_size() == 1 && base(doc.texts(0)).text() == "kept",
+                "nemotron v2: the closed region maps");
+        require(warnings.size() == 1 &&
+                    warnings[0].code() == vlmv1::PAGE_WARNING_CODE_OUTPUT_TRUNCATED,
+                "nemotron v2: the unterminated last region is reported");
+
+        std::vector<vlmv1::PageWarning> clean;
+        map(vlmv1::RESPONSE_FORMAT_NEMOTRON_PARSE_V2,
+            "<x_0.1><y_0.1>kept<x_0.9><y_0.2><class_Text>\n", &clean);
+        require(clean.empty(), "nemotron v2: a closed answer reports nothing");
+    }
 }
 
 // test_nemotron_parse_v3_5.py: artifact/duplicate drop, bbox scaling,
@@ -436,6 +564,7 @@ int main() {
         verify_an_unusable_layout_answer_is_a_mapping_failure();
         verify_nemotron_parse_v2();
         verify_nemotron_parse_v3_5();
+        verify_dropped_content_is_reported();
         verify_doclang();
         verify_mineru2_unsupported();
     } catch (const std::exception& error) {

@@ -55,7 +55,20 @@ struct NemotronBlock {
     bool operator<(const NemotronBlock& o) const;
 };
 
-// Every well-formed block in output order, repeats dropped.
-std::vector<NemotronBlock> nemotron_v35_blocks(std::string_view content);
+// What nemotron_v35_blocks read past without building a block from it.
+struct NemotronUnread {
+    // Class tokens whose segment holds text but fewer than two coordinate
+    // tokens: blocks with no corners.
+    size_t blocks_without_corners = 0;
+    // Bytes of text after the last class token, coordinate tokens and
+    // artifacts not counted: a block the answer broke off inside.
+    size_t trailing_bytes = 0;
+    bool any() const { return blocks_without_corners > 0 || trailing_bytes > 0; }
+};
+
+// Every well-formed block in output order, repeats dropped. `unread`, when
+// given, receives what was not one.
+std::vector<NemotronBlock> nemotron_v35_blocks(std::string_view content,
+                                               NemotronUnread* unread = nullptr);
 
 }  // namespace vlm::mapping
