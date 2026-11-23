@@ -130,7 +130,10 @@ Clients stream `ConvertPagesRequest` (one `ConvertOptions`, then one
 moment its VLM call returns, out-of-order pages are legal and key on
 `page_no`. A `PageDocument` lists anything cut to a server cap as typed
 `PageWarning`s beside its fragment (a table past the row, column or cell
-caps, ...). A `ConvertComplete` trailer closes the stream. Health
+caps, ...), and an answer the model did not finish (cut off at
+`max_tokens`) as `PAGE_WARNING_CODE_GENERATION_TRUNCATED`. A
+`ConvertComplete` trailer closes the stream and counts such pages in
+`pages_truncated`. Health
 (`grpc.health.v1.Health`) and server reflection are registered.
 `GetServiceInfo` also carries a `UiInfo` block (title, path,
 description) advertising this service's tab to the shared demo shell.

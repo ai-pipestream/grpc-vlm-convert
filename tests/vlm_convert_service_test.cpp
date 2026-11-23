@@ -68,6 +68,8 @@ std::string base64_decode(const std::string& encoded) {
 //   DOTSPROSE → prose where a dots.ocr layout was asked for
 //   BLANKREPLY → an empty answer
 //   else    → canned DocTags naming the marker
+// How the answer stopped follows the marker too: CUTOFF → "length" (cut at
+// max_tokens), FILTERED → "content_filter", else "stop".
 struct FakeVlm {
     httplib::Server server;
     std::thread thread;
@@ -200,7 +202,9 @@ struct FakeVlm {
                 {"usage", {{"prompt_tokens", 1200}, {"completion_tokens", 512}}},
                 {"choices",
                  {{{"message", {{"role", "assistant"}, {"content", content}}},
-                   {"finish_reason", "length"},
+                   {"finish_reason", png.contains("CUTOFF")     ? "length"
+                                     : png.contains("FILTERED") ? "content_filter"
+                                                                : "stop"},
                    {"logprobs",
                     {{"content",
                       {{{"token", "a"}, {"logprob", -0.1}, {"top_logprobs", alternates}},
@@ -473,11 +477,11 @@ void verify_streaming_and_failure_isolation(const std::shared_ptr<grpc::Channel>
                 "the endpoint's own model name wins over the requested one");
         require(generation.endpoint().starts_with("http://127.0.0.1:"),
                 "the answering endpoint is recorded");
-        require(generation.finish_reason() == "length",
-                "a truncated page says so, verbatim");
-        require(generation.stop_reason() == docv1::VLM_STOP_REASON_LENGTH &&
+        require(generation.finish_reason() == "stop",
+                "the endpoint's stop reason rides the item verbatim");
+        require(generation.stop_reason() == docv1::VLM_STOP_REASON_END_OF_SEQUENCE &&
                     !generation.has_truncation(),
-                "length is typed without claiming repetition cancellation");
+                "an answer that ended on its own is typed as one");
         require(generation.prompt_tokens() == 1200 && generation.completion_tokens() == 512,
                 "token usage rides the fragment");
     }
@@ -679,7 +683,8 @@ void verify_unusable_layout_answers(const std::shared_ptr<grpc::Channel>& channe
     vlmv1::ConvertOptions options;
     options.set_response_format(vlmv1::RESPONSE_FORMAT_DOTS_JSON);
     Collected out = convert(channel, options,
-                            {page(1, "DOTSPROSE1"), page(2, "BLANKREPLY2"), page(3, "DOTSPAGE3")});
+                            {page(1, "DOTSPROSE1-CUTOFF"), page(2, "BLANKREPLY2"),
+                             page(3, "DOTSPAGE3")});
     require(out.status.ok(), "the stream ends OK: " + out.status.error_message());
     require(out.raws.size() == 1 && out.documents.size() == 2,
             "prose is a PageRaw, the blank answer and the layout are PageDocuments: raws=" +
@@ -697,7 +702,7 @@ void verify_unusable_layout_answers(const std::shared_ptr<grpc::Channel>& channe
     for (const vlmv1::PageDocument& document : out.documents) {
         require(document.has_generation() &&
                     document.generation().model() == "served-granite" &&
-                    document.generation().finish_reason() == "length",
+                    document.generation().finish_reason() == "stop",
                 "every PageDocument names its generation");
         if (document.page_no() == 3) {
             require(document.document().texts_size() == 1 && document.warnings_size() == 0,
@@ -715,6 +720,50 @@ void verify_unusable_layout_answers(const std::shared_ptr<grpc::Channel>& channe
     }
     require(out.complete.pages_ok() == 2 && out.complete.pages_failed() == 1,
             "the trailer counts the PageRaw as failed");
+}
+
+// A page whose answer was cut off (max_tokens, the content filter) still
+// maps, from the part that arrived. It must say so where a caller looks:
+// a typed warning beside the fragment and a count in the trailer, not only
+// a stop reason inside each item's source list.
+void verify_truncated_generation(const std::shared_ptr<grpc::Channel>& channel) {
+    vlmv1::ConvertOptions options;  // DocTags
+    Collected out = convert(channel, options,
+                            {page(1, "PAGE1-CUTOFF"), page(2, "PAGE2"), page(3, "PAGE3-FILTERED"),
+                             page(4, "RAWTEXT4-CUTOFF")});
+    require(out.status.ok(), "the stream ends OK: " + out.status.error_message());
+    require(out.documents.size() == 3 && out.raws.size() == 1,
+            "three pages map and the prose page is a PageRaw");
+    for (const vlmv1::PageDocument& document : out.documents) {
+        if (document.page_no() == 2) {
+            require(document.warnings_size() == 0, "a page that ended on its own has no warning");
+            continue;
+        }
+        require(document.warnings_size() == 1 &&
+                    document.warnings(0).code() ==
+                        vlmv1::PAGE_WARNING_CODE_GENERATION_TRUNCATED &&
+                    document.warnings(0).ref().empty(),
+                "page " + std::to_string(document.page_no()) +
+                    " carries the truncated-generation warning for the whole page");
+        require(document.generation().stop_reason() ==
+                    (document.page_no() == 1 ? docv1::VLM_STOP_REASON_LENGTH
+                                             : docv1::VLM_STOP_REASON_CONTENT_FILTERED),
+                "the page's generation says which way it was cut");
+        require(document.warnings(0).message().contains(document.generation().finish_reason()),
+                "the warning message quotes the endpoint's stop reason");
+    }
+    require(out.raws[0].page_no() == 4 &&
+                out.raws[0].generation().stop_reason() == docv1::VLM_STOP_REASON_LENGTH,
+            "the PageRaw of a cut answer names the stop reason");
+    require(out.complete.pages_ok() == 3 && out.complete.pages_failed() == 1,
+            "the trailer counts documents and raws as before");
+    require(out.complete.pages_truncated() == 3,
+            "the trailer counts every page whose answer was cut off: " +
+                std::to_string(out.complete.pages_truncated()));
+
+    Collected whole = convert(channel, options, {page(1, "PAGE1"), page(2, "PAGE2")});
+    require(whole.status.ok() && whole.complete.pages_truncated() == 0,
+            "a stream of whole answers counts no truncated page");
 }
 
 // With logprobs off (an endpoint that rejects them), calls omit the
@@ -1252,6 +1301,7 @@ int main() {
         verify_stop_and_max_tokens(server.channel, &fake);
         verify_alternatives(server.channel, &fake);
         verify_page_warnings(server.channel);
+        verify_truncated_generation(server.channel);
         verify_unusable_layout_answers(server.channel);
         verify_logprobs_off(&fake);
         verify_abort_on_error(server.channel);

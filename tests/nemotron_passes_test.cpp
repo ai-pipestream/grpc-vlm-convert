@@ -162,8 +162,30 @@ void verify_failed_stages_keep_the_page() {
         fake.page = answer(kPageText, "length");
         const auto out = vlm::run_nemotron_passes(page_call(png), {}, fake.runner());
         require(fake.batches.size() == 1 && out.result.text == kPageText &&
-                    out.result.finish_reason == "length" && out.shortfall.empty(),
+                    out.result.finish_reason == "length",
                 "a page cut at max_tokens is not cropped");
+        // The crop passes were asked for and did not run: that is a
+        // shortfall like a failed detector, never a silent single pass.
+        require(out.shortfall.contains("page call") && out.shortfall.contains("length") &&
+                    out.shortfall.contains("no region was cropped"),
+                "a page pass cut at max_tokens says the crop passes were skipped: " +
+                    out.shortfall);
+    }
+    {
+        FakeStages fake;
+        fake.page = answer("  \n");
+        const auto out =
+            vlm::run_nemotron_passes(page_call(png), {.triple = true}, fake.runner());
+        require(fake.batches.size() == 1 && out.shortfall.contains("no text") &&
+                    out.shortfall.contains("no region was cropped"),
+                "a blank page pass says the later passes were skipped: " + out.shortfall);
+    }
+    {
+        FakeStages fake;
+        fake.page = failure("HTTP 503");
+        const auto out = vlm::run_nemotron_passes(page_call(png), {}, fake.runner());
+        require(!out.result.ok && out.shortfall.empty(),
+                "a failed page call is a failed page, with nothing to fall short of");
     }
     {
         FakeStages fake;

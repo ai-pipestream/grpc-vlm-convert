@@ -57,6 +57,9 @@ class VlmConvertServiceImpl final
     std::atomic<long> failed{0};
     std::atomic<long> pages_ok{0};
     std::atomic<long> pages_failed{0};
+    // Pages whose model answer ended early (max_tokens, content filter,
+    // inference error); each is also in pages_ok or pages_failed.
+    std::atomic<long> pages_truncated{0};
     // Pages whose VLM answer was handled (mapped, or failed), counted as
     // each page finishes and before it gives back its in-flight slot,
     // whatever becomes of its stream.

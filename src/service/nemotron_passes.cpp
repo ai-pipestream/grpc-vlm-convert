@@ -136,7 +136,18 @@ NemotronPassResult run_nemotron_passes(const VlmCall& page, const NemotronPasses
         return cancelled();
     }
     if (!complete(result)) {
-        return finished(std::move(result));  // nothing to crop from
+        // Nothing to crop from. The later passes were asked for and did
+        // not run, so a page call that did answer says so; one that failed
+        // is a failed page and has nothing to fall short of.
+        std::string shortfall;
+        if (result.ok) {
+            shortfall = mapping::trim(result.text).empty()
+                            ? "the page call returned no text"
+                            : "the page call did not finish (finish reason " +
+                                  result.finish_reason + ")";
+            shortfall += "; no region was cropped";
+        }
+        return finished(std::move(result), std::move(shortfall));
     }
 
     std::optional<std::string> detection;
