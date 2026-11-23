@@ -18,10 +18,13 @@ namespace vlmv1 = ai::pipestream::vlm::v1;
 
 enum class Stage { kPage, kDetection, kCrop };
 
+// docling's max_new_tokens for Nemotron Parse 3.5.
+constexpr int kNemotronMaxTokens = 8744;
+
 // docling's per-stage generation settings (_nemotron_inputs).
 VlmCall stage_call(const VlmCall& page, Stage stage) {
     VlmCall call = page;
-    call.max_tokens = stage == Stage::kDetection ? 4096 : 8744;
+    call.max_tokens = stage == Stage::kDetection ? 4096 : kNemotronMaxTokens;
     call.sampling = {
         .temperature = stage == Stage::kCrop ? 0.1 : 0.2,
         .top_p = 1.0,
@@ -70,6 +73,20 @@ NemotronPassResult cancelled() {
 }
 
 }  // namespace
+
+void apply_nemotron_page_settings(VlmCall* call, bool prompt_given) {
+    if (!prompt_given) {
+        call->prompt = std::string(mapping::kNemotronPagePrompt);
+    }
+    call->max_tokens = kNemotronMaxTokens;
+    call->sampling = {
+        .temperature = 0.0,
+        .top_p = std::nullopt,
+        .top_k = 1,
+        .repetition_penalty = 1.1,
+        .skip_special_tokens = false,
+    };
+}
 
 std::optional<NemotronPasses> nemotron_passes_for(const vlmv1::ConvertOptions& options,
                                                   vlmv1::ResponseFormat format,

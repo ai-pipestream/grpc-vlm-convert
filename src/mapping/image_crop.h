@@ -7,8 +7,10 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include "ai/pipestream/document/v1/document.pb.h"
 
@@ -104,5 +106,9 @@ class PageRaster {
 bool crop_png_image(const std::string& png, double left, double top, double right,
                     double bottom, uint32_t page_width, uint32_t page_height,
                     ai::pipestream::document::v1::ImageRef* image);
+
+// The width and height a raster's header declares, read without decoding
+// a pixel; nullopt when the bytes are not an image stb can read.
+std::optional<std::pair<uint32_t, uint32_t>> raster_size(std::string_view png);
 
 }  // namespace vlm::mapping

@@ -286,24 +286,33 @@ struct StageEndpoint {
     }
 };
 
-// One double pass page through the service; returns its PageDocument.
-vlmv1::PageDocument convert_double_pass(vlm::VlmConvertServiceImpl& service) {
+vlmv1::ConvertOptions nemotron_options(vlmv1::NemotronParsePasses passes) {
     vlmv1::ConvertOptions options;
     options.set_preset(vlmv1::VLM_PRESET_RAW);
     options.set_preset_raw("nemotron-parse");
     options.set_response_format(vlmv1::RESPONSE_FORMAT_NEMOTRON_PARSE_V3_5);
-    options.mutable_nemotron_parse()->set_passes(vlmv1::NEMOTRON_PARSE_PASSES_DOUBLE);
+    options.mutable_nemotron_parse()->set_passes(passes);
+    return options;
+}
+
+vlmv1::PageImage gray_page(uint32_t width, uint32_t height) {
+    vlmv1::PageImage image;
+    image.set_page_no(1);
+    image.set_width(width);
+    image.set_height(height);
+    image.set_png(gray_png(1000, 800));
+    return image;
+}
+
+// One page through the service; returns the page's final event.
+vlmv1::ConvertPagesResponse convert_one(vlm::VlmConvertServiceImpl& service,
+                                        const vlmv1::ConvertOptions& options,
+                                        const vlmv1::PageImage& image) {
     std::vector<vlmv1::ConvertPagesRequest> requests(2);
     *requests[0].mutable_options() = options;
-    auto* image = requests[1].mutable_page_image();
-    image->set_page_no(1);
-    image->set_width(1000);
-    image->set_height(800);
-    image->set_png(gray_png(1000, 800));
-
+    *requests[1].mutable_page_image() = image;
     size_t next = 0;
-    vlmv1::PageDocument page;
-    bool mapped = false;
+    vlmv1::ConvertPagesResponse last;
     const grpc::Status status = service.ConvertPagesCore(
         [&](vlmv1::ConvertPagesRequest* request) {
             if (next == requests.size()) {
@@ -313,16 +322,22 @@ vlmv1::PageDocument convert_double_pass(vlm::VlmConvertServiceImpl& service) {
             return true;
         },
         [&](const vlmv1::ConvertPagesResponse& event) {
-            if (event.has_page_document()) {
-                page = event.page_document();
-                mapped = true;
+            if (event.has_page_document() || event.has_page_raw()) {
+                last = event;
             }
             return true;
         },
         nullptr);
-    require(status.ok(), "double pass stream: " + status.error_message());
-    require(mapped, "double pass: the page maps");
-    return page;
+    require(status.ok(), "nemotron stream: " + status.error_message());
+    return last;
+}
+
+// One double pass page through the service; returns its PageDocument.
+vlmv1::PageDocument convert_double_pass(vlm::VlmConvertServiceImpl& service) {
+    const vlmv1::ConvertPagesResponse event = convert_one(
+        service, nemotron_options(vlmv1::NEMOTRON_PARSE_PASSES_DOUBLE), gray_page(1000, 800));
+    require(event.has_page_document(), "double pass: the page maps");
+    return event.page_document();
 }
 
 void verify_service_runs_the_passes() {
@@ -369,6 +384,75 @@ void verify_crops_stay_within_the_inflight_cap() {
     require(service.vlm_slots().in_use() == 0, "every slot is given back");
 }
 
+
+// The single pass sends what docling's API engine sends for the
+// nemotron_parse_v3_5 preset, and its page prompt when the request has
+// none.
+void verify_single_pass_matches_docling() {
+    StageEndpoint endpoint;
+    endpoint.start();
+    vlm::Config config;
+    config.endpoint = "http://127.0.0.1:" + std::to_string(endpoint.port);
+    vlm::VlmConvertServiceImpl service(config);
+
+    vlmv1::ConvertOptions options = nemotron_options(vlmv1::NEMOTRON_PARSE_PASSES_UNSPECIFIED);
+    require(convert_one(service, options, gray_page(1000, 800)).has_page_document(),
+            "single pass: the page maps");
+    options.set_prompt("my prompt");
+    convert_one(service, options, gray_page(1000, 800));
+
+    std::lock_guard<std::mutex> lock(endpoint.mutex);
+    require(endpoint.bodies.size() == 2, "single pass: one call per page");
+    nlohmann::json settings = endpoint.bodies[0];
+    settings.erase("messages");
+    const nlohmann::json docling = {
+        {"model", "nemotron-parse"}, {"max_tokens", 8744}, {"logprobs", true},
+        {"temperature", 0.0},        {"top_k", 1},         {"repetition_penalty", 1.1},
+        {"skip_special_tokens", false}};
+    require(settings == docling,
+            "single pass: docling's API settings reach the wire: " + settings.dump());
+    auto prompt = [&](size_t call) {
+        return endpoint.bodies[call]["messages"][0]["content"][0]["text"].get<std::string>();
+    };
+    require(prompt(0) == vlm::mapping::kNemotronPagePrompt,
+            "single pass: docling's page prompt by default: " + prompt(0));
+    require(prompt(1) == "my prompt", "single pass: a request's own prompt is kept");
+}
+
+// A page sent without its size takes it from the PNG header, so its boxes
+// match the page sent with one; without a readable header it fails before
+// the model is called.
+void verify_page_size_from_png_header() {
+    StageEndpoint endpoint;
+    endpoint.start();
+    vlm::Config config;
+    config.endpoint = "http://127.0.0.1:" + std::to_string(endpoint.port);
+    vlm::VlmConvertServiceImpl service(config);
+    const vlmv1::ConvertOptions options =
+        nemotron_options(vlmv1::NEMOTRON_PARSE_PASSES_UNSPECIFIED);
+
+    auto table_box = [&](const vlmv1::PageImage& image) {
+        const vlmv1::ConvertPagesResponse event = convert_one(service, options, image);
+        require(event.has_page_document() && event.page_document().document().tables_size() == 1,
+                "sized page: one table");
+        return event.page_document().document().tables(0).prov(0).bbox();
+    };
+    const auto declared = table_box(gray_page(1000, 800));
+    const auto from_header = table_box(gray_page(0, 0));
+    require(declared.r() > declared.l() && declared.b() > declared.t(),
+            "declared size: the box has area");
+    require(from_header.DebugString() == declared.DebugString(),
+            "no size: the box matches the declared size's: " + from_header.DebugString());
+
+    vlmv1::PageImage unreadable = gray_page(0, 0);
+    unreadable.set_png(make_png("NOT-A-HEADER"));
+    const size_t calls = endpoint.bodies.size();
+    const vlmv1::ConvertPagesResponse event = convert_one(service, options, unreadable);
+    require(event.has_page_raw() && event.page_raw().error().contains("no width or height"),
+            "no size and no header: the page fails: " + event.DebugString());
+    require(endpoint.bodies.size() == calls, "no size and no header: the model is not called");
+}
+
 }  // namespace
 
 int main() {
@@ -380,6 +464,8 @@ int main() {
         verify_options();
         verify_service_runs_the_passes();
         verify_crops_stay_within_the_inflight_cap();
+        verify_single_pass_matches_docling();
+        verify_page_size_from_png_header();
     } catch (const std::exception& error) {
         std::println(stderr, "{}", error.what());
         return 1;

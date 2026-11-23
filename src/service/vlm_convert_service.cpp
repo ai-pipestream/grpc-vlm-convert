@@ -11,8 +11,10 @@
 #include <optional>
 #include <string_view>
 #include <thread>
+#include <tuple>
 #include <vector>
 
+#include "mapping/image_crop.h"
 #include "mapping/mapper.h"
 #include "nemotron_passes.h"
 #include "presets.h"
@@ -301,6 +303,20 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
         page.page_no = job.image.page_no();
         page.width = job.image.width();
         page.height = job.image.height();
+        // Every box is scaled to the page size, so a page sent without one
+        // takes it from its PNG header; one whose header is unreadable
+        // fails here instead of mapping into items with empty boxes.
+        if (page.width == 0 || page.height == 0) {
+            const auto size = mapping::raster_size(job.image.png());
+            if (!size) {
+                auto* raw = event->mutable_page_raw();
+                raw->set_page_no(job.image.page_no());
+                raw->set_error("page has no width or height, and its PNG header does not "
+                               "give one");
+                return true;
+            }
+            std::tie(page.width, page.height) = *size;
+        }
         // The one copy of the raster: the call reads it in place, and the
         // DocTags mapper crops pictures out of it afterwards.
         page.png = std::move(*job.image.mutable_png());
@@ -543,21 +559,26 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
         event.mutable_page_started()->set_page_no(image.page_no());
         events.push(std::move(event));
 
-        jobs.push(PageJob{
-            .image = std::move(*request.mutable_page_image()),
-            .call = {.endpoint = endpoint,
+        VlmCall call{.endpoint = endpoint,
                      .model = model,
                      .prompt = prompt,
                      .stop = stop,
                      .max_tokens = max_tokens,
                      .top_logprobs = static_cast<int>(options.top_logprobs()),
                      .logprobs = config_.request_logprobs,
+                     .sampling = {},
                      .png = {},
                      .timeout_seconds = static_cast<long>(config_.vlm_timeout_seconds),
                      // The operator's key goes to the operator's endpoint
                      // only, never to one a request named.
                      .api_key = endpoint_override ? Secret() : config_.vlm_api_key,
-                     .cancelled = {}},
+                     .cancelled = {}};
+        if (format == vlmv1::RESPONSE_FORMAT_NEMOTRON_PARSE_V3_5) {
+            apply_nemotron_page_settings(&call, !options.prompt().empty());
+        }
+        jobs.push(PageJob{
+            .image = std::move(*request.mutable_page_image()),
+            .call = std::move(call),
             .format = format,
             .model = model,
             .nemotron = nemotron,

@@ -174,4 +174,15 @@ bool crop_png_image(const std::string& png, double left, double top, double righ
     return raster.crop(left, top, right, bottom, image) == PageRaster::Crop::kAttached;
 }
 
+std::optional<std::pair<uint32_t, uint32_t>> raster_size(std::string_view png) {
+    int width = 0, height = 0, channels = 0;
+    if (stbi_info_from_memory(reinterpret_cast<const stbi_uc*>(png.data()),
+                              static_cast<int>(std::min<size_t>(png.size(), INT32_MAX)), &width,
+                              &height, &channels) == 0 ||
+        width <= 0 || height <= 0) {
+        return std::nullopt;
+    }
+    return std::pair{static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
+}
+
 }  // namespace vlm::mapping

@@ -252,9 +252,11 @@ message PageImage {
   // 1-based page number, at most 2147483647 (the Document keys pages as
   // int32). Events key on this; out-of-order is legal.
   uint32 page_no = 2;
-  // Raster width in pixels, used to scale DocTags locations to pixels.
+  // Raster width in pixels, used to scale model boxes to pixels. Zero, or
+  // a zero height, means both are read from the PNG header; a page whose
+  // header gives none fails as a PageRaw error.
   uint32 width = 3;
-  // Raster height in pixels, used to scale DocTags locations to pixels.
+  // Raster height in pixels, used to scale model boxes to pixels.
   uint32 height = 4;
 }
 

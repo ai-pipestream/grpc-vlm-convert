@@ -43,7 +43,10 @@ demo shell reads it to build its tab bar.
 
 Two input styles, first message chooses: `pdf_chunk` messages the server
 rasterizes (fallback), or repeated `page_image` with PNG + page_no +
-width/height (preferred).
+width/height (preferred). Every box is scaled to the page size, so a page
+sent without a width or height takes both from its PNG header; one whose
+header gives none fails as a `PageRaw` error before the model is called,
+rather than mapping into items with empty boxes.
 
 `ConvertOptions` carries a `preset` enum plus `preset_raw` for open
 vocabularies, the expected `response_format` (`DOCTAGS` / `MARKDOWN` /
@@ -158,8 +161,12 @@ service rather than an oversight:
 ### Nemotron Parse double and triple pass
 
 `ConvertOptions.nemotron_parse` is docling's `NemotronParseOptions`. With
-the single pass (the default) a page is one call like every other format.
-With `NEMOTRON_PARSE_PASSES_DOUBLE` or `_TRIPLE` and the
+the single pass (the default) a page is one call with what docling's API
+engine sends for its `nemotron_parse_v3_5` preset: greedy decoding
+(temperature 0, top-k 1), repetition penalty 1.1, special tokens kept and
+8744 tokens, with docling's page prompt
+(`</s><s><predict_bbox><predict_classes><output_markdown><predict_text_in_pic>`)
+when the request sets none. With `NEMOTRON_PARSE_PASSES_DOUBLE` or `_TRIPLE` and the
 `nemotron_parse_v3_5` format, a page follows docling's `_predict_nemotron`:
 
 1. The page call, with docling's fullpage settings (temperature 0.2,
@@ -424,7 +431,9 @@ Generation parameters come from the preset table in `src/presets.cpp`:
 the two DocTags presets send explicit stop sequences, one
 `stop: ["</doctag>", "<end_of_utterance>"]` with `max_tokens` 4096 and
 the other `stop: ["</doctag>", "<|end_of_text|>"]` with `max_tokens`
-8192; every other preset omits `stop` and uses 4096.
+8192; every other preset omits `stop` and uses 4096. The
+`nemotron_parse_v3_5` format brings docling's own page settings with it,
+whatever the preset (section 3, Nemotron Parse double and triple pass).
 
 ## 6. Coordinator contract
 
@@ -457,6 +466,8 @@ the other `stop: ["</doctag>", "<|end_of_text|>"]` with `max_tokens`
   crop plans, grid and chart checks, remapping, merging and difflib's
   ratio against values docling's own functions produced; the stage
   settings, failed stages, batching, option checks, and the service path
-  against a fake endpoint, including the in-flight cap.
+  against a fake endpoint, including the in-flight cap, the single pass's
+  settings and prompt on the wire, and page sizes taken from the PNG
+  header.
 - Golden: one real page against a live VLM endpoint, behind a flag, not
   CI default.
