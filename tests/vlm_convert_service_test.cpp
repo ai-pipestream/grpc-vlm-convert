@@ -69,7 +69,8 @@ std::string base64_decode(const std::string& encoded) {
 //   BLANKREPLY → an empty answer
 //   else    → canned DocTags naming the marker
 // How the answer stopped follows the marker too: CUTOFF → "length" (cut at
-// max_tokens), FILTERED → "content_filter", else "stop".
+// max_tokens), FILTERED → "content_filter", else "stop". NOMODEL leaves
+// the "model" field out of the reply.
 struct FakeVlm {
     httplib::Server server;
     std::thread thread;
@@ -210,6 +211,9 @@ struct FakeVlm {
                       {{{"token", "a"}, {"logprob", -0.1}, {"top_logprobs", alternates}},
                        {{"token", "b"}, {"logprob", -0.2}}}}}}}}},
             };
+            if (png.contains("NOMODEL")) {
+                reply.erase("model");
+            }
             response.set_content(reply.dump(), "application/json");
         });
         port = server.bind_to_any_port("127.0.0.1");
@@ -766,6 +770,40 @@ void verify_truncated_generation(const std::shared_ptr<grpc::Channel>& channel) 
             "a stream of whole answers counts no truncated page");
 }
 
+// GenerationSource.model is the model that answered. An endpoint that does
+// not say which model that was leaves it unset: the requested name is a
+// request, already recorded in the collector source, and an endpoint that
+// serves one model whatever it is asked for would otherwise have its
+// answers recorded under a name it never ran.
+void verify_unreported_model_is_not_invented(const std::shared_ptr<grpc::Channel>& channel) {
+    vlmv1::ConvertOptions options;  // DocTags, granite-docling
+    options.set_top_logprobs(2);
+    Collected out = convert(channel, options, {page(1, "PAGE1-NOMODEL"), page(2, "PAGE2")});
+    require(out.status.ok() && out.documents.size() == 2, "both pages convert: " +
+                                                            out.status.error_message());
+    for (const vlmv1::PageDocument& document : out.documents) {
+        const auto& base = document.document().texts(0).section_header().base();
+        const auto& generation = base.source(1).generation();
+        require(base.source(0).collector().model() == "ibm-granite/granite-docling-258M",
+                "the collector source names the model that was asked for");
+        if (document.page_no() == 2) {
+            require(generation.model() == "served-granite" &&
+                        document.generation().model() == "served-granite",
+                    "an endpoint that names its model has it recorded");
+            continue;
+        }
+        require(generation.model().empty() && document.generation().model().empty(),
+                "an endpoint that names no model leaves the generation's model unset, got <" +
+                    generation.model() + ">");
+        require(generation.endpoint().starts_with("http://127.0.0.1:") &&
+                    generation.finish_reason() == "stop",
+                "the rest of the generation is still recorded");
+        const auto& alternatives = document.document().body().meta().alternatives();
+        require(alternatives.hypotheses_size() > 0 && !alternatives.has_created_by(),
+                "the page's alternates claim no model either");
+    }
+}
+
 // With logprobs off (an endpoint that rejects them), calls omit the
 // parameter, and a request for alternates, which need them, fails before a
 // page is paid for.
@@ -1302,6 +1340,7 @@ int main() {
         verify_alternatives(server.channel, &fake);
         verify_page_warnings(server.channel);
         verify_truncated_generation(server.channel);
+        verify_unreported_model_is_not_invented(server.channel);
         verify_unusable_layout_answers(server.channel);
         verify_logprobs_off(&fake);
         verify_abort_on_error(server.channel);

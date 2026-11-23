@@ -166,8 +166,18 @@ HttpGateway::HttpGateway(const Config& config, VlmConvertServiceImpl& service)
             return httplib::Server::HandlerResponse::Handled;
         });
     }
-    server_.Get("/healthz", [](const httplib::Request& /*request*/,
-                               httplib::Response& response) {
+    server_.Get("/healthz", [this](const httplib::Request& /*request*/,
+                                   httplib::Response& response) {
+        // The listener being up says nothing about the VLM endpoint, and
+        // without that endpoint every page fails.
+        if (health_) {
+            const EndpointHealth health = health_();
+            if (!health.serving) {
+                response.status = 503;
+                response.set_content("not serving: " + health.detail, "text/plain");
+                return;
+            }
+        }
         response.set_content("ok", "text/plain");
     });
     server_.Post("/v1/convert",

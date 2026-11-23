@@ -106,6 +106,33 @@ A UI paints `PageDocument` immediately. gRParse merges fragments with
 the same additive rules as other collectors; it must not hold page 4
 until page 3 arrives.
 
+### Health
+
+This process holds no model, so its health is the VLM endpoint's. With no
+endpoint a stream could use, or one that does not answer, every page of
+every stream fails; a health check that said SERVING then would route an
+orchestrator's traffic to a service that cannot do its one job.
+
+An `EndpointMonitor` probes the configured endpoint once before the
+listening line is printed and then every `GRPC_VLM_HEALTH_PROBE_SECONDS`
+(default 15): one `GET` of the route beside its chat completions one
+(`/v1/models` under the same path prefix and query), with the API key when
+one is set. Any answer below 500 other than 401 and 403 is serving (an
+endpoint without a model list answers 404, which still proves it is
+reachable). Nothing answering within 5 s, a 5xx (a model still loading
+answers 503) and 401/403 (the endpoint refuses this server's credentials)
+are not serving. The verdict sets `grpc.health.v1.Health` for the overall
+status and for `ai.pipestream.vlm.v1.VlmConvertService`, drives `/healthz`
+(200 `ok` or 503 with the reason), and is logged on every change.
+
+With `GRPC_VLM_ENDPOINT` empty there is nothing to probe: health is
+serving only when per-request overrides are allowed, since a request can
+then bring its own endpoint, and not serving otherwise. A probe interval
+of 0 turns the probe off; health then reflects configuration alone.
+
+Health gates nothing inside the server: a stream that arrives while the
+endpoint is down still runs and fails page by page, exactly as before.
+
 ### HTTP shim
 
 The same binary also serves an HTTP/JSON front end (`GRPC_VLM_HTTP_PORT`,
@@ -399,8 +426,10 @@ score. `Hypothesis.range` is never set for the same reason as above.
 Every emitted item carries two sources: the `CollectorSource`
 (`vlm-convert`, the resolved model name, this server's version) and a
 `GenerationSource` describing the call that produced the page — the
-model the endpoint says answered (the requested name only when it
-echoes none), the endpoint origin (scheme, host and port; userinfo,
+model the endpoint says answered (left unset when it names none: the
+requested name is in the `CollectorSource`, and an endpoint that serves
+its one model whatever it is asked for would otherwise have its answers
+recorded under a model that never ran), the endpoint origin (scheme, host and port; userinfo,
 path and query are dropped because deployments hide tokens there), the
 `finish_reason`
 verbatim, and `prompt_tokens` / `completion_tokens` when the endpoint

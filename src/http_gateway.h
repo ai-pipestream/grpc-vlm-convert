@@ -1,11 +1,13 @@
 #pragma once
 
+#include <functional>
 #include <string>
 #include <thread>
 
 #include <httplib.h>
 
 #include "config.h"
+#include "endpoint_health.h"
 
 namespace vlm {
 
@@ -22,7 +24,8 @@ class VlmConvertServiceImpl;
 //                              JSON object out (the whole stream, in order)
 //   POST /v1/convert/stream  — same request; chunked NDJSON out, one
 //                              ConvertPagesResponse per line as it happens
-//   GET  /healthz            — 200 "ok"
+//   GET  /healthz            — 200 "ok" while the VLM endpoint serves,
+//                              503 with the reason while it does not
 //
 // It binds loopback unless the operator names another host, and then a
 // bearer token is required (both checked at startup, see Config). Request
@@ -41,12 +44,18 @@ class HttpGateway {
 
     int port() const { return port_; }
 
+    // Where /healthz reads the VLM endpoint's state from (main wires the
+    // EndpointMonitor in). Set before start(). Without one /healthz
+    // answers for the listener alone.
+    void set_health(std::function<EndpointHealth()> health) { health_ = std::move(health); }
+
   private:
     void handle_convert(const httplib::Request& request, httplib::Response& response);
     void handle_convert_stream(const httplib::Request& request, httplib::Response& response);
 
     const Config& config_;
     VlmConvertServiceImpl& service_;
+    std::function<EndpointHealth()> health_;
     httplib::Server server_;
     std::thread thread_;
     int port_ = -1;
