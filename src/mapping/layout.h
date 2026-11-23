@@ -106,6 +106,26 @@ struct LayoutRef {
 // Builds one page fragment. Items are created in output order; each
 // lives under the body or under a parent node, and finish() stamps every
 // self_ref, parent and children list.
+// What a fragment with no items means. An answer that maps to nothing is
+// never passed off as a converted blank page unless the model itself said
+// the page is blank.
+enum class EmptyPage {
+    // The answer held text the mapper built no item from: a mapping
+    // failure, so the text goes back to the caller as PageRaw.
+    kMappingFailure,
+    // The model returned no text: an empty fragment that carries
+    // PAGE_WARNING_CODE_EMPTY_RESPONSE.
+    kBlankReply,
+    // The answer is the format's own empty layout (dots.ocr "[]", a
+    // Chandra Blank-Page block): an empty fragment, nothing to warn about.
+    kDeclaredEmpty,
+};
+
+// kBlankReply when the model's whole answer is whitespace, else
+// kMappingFailure: what an empty fragment means for a format with no way
+// to declare a blank page.
+EmptyPage blank_reply_or_failure(const std::string& text);
+
 class LayoutWriter {
   public:
     using Ref = LayoutRef;
@@ -213,9 +233,12 @@ class LayoutWriter {
                                 const std::vector<size_t>& caption_blocks,
                                 bool code_owners = false);
 
-    // Stamps refs, the page entry and the crop warnings. Returns false
-    // with `error` set when the page produced no item at all.
-    bool finish(std::string* error, const std::string& format_name, bool allow_empty = false);
+    // Stamps refs, the page entry and the crop warnings. A page that
+    // produced no item at all is a converted page only for the reason
+    // `empty` gives; otherwise it returns false with `error` set, and the
+    // caller hands the model's text back as PageRaw.
+    bool finish(std::string* error, const std::string& format_name,
+                EmptyPage empty = EmptyPage::kMappingFailure);
 
   private:
     struct Entry {

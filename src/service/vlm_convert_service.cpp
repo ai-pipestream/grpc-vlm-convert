@@ -410,6 +410,9 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
             auto* document = event->mutable_page_document();
             document->set_page_no(page.page_no);
             *document->mutable_document() = std::move(fragment);
+            // Items carry the generation in their source lists; a fragment
+            // with no items has nowhere else to say how its answer ended.
+            *document->mutable_generation() = page.generation;
             // What the mapper cut to a server cap rides beside the
             // fragment, so a short table never passes for a complete one.
             if (!shortfall.empty()) {
@@ -427,6 +430,9 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
             raw->set_page_no(page.page_no);
             raw->set_text(result.text);
             raw->set_error(map_error);
+            // An answer cut off at max_tokens is the usual reason it no
+            // longer parses; the stop reason is what tells the caller so.
+            *raw->mutable_generation() = page.generation;
         }
         return true;
     };

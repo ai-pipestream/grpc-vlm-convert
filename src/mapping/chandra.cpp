@@ -808,7 +808,7 @@ bool map_chandra_html(const std::string& text, const PageContext& page, docv1::D
                       std::string* error, std::vector<vlmv1::PageWarning>* warnings) {
     LayoutWriter writer(page, out, warnings);
     if (py_strip(text).empty()) {
-        return writer.finish(error, "Chandra", true);
+        return writer.finish(error, "Chandra", EmptyPage::kBlankReply);
     }
     const std::unique_ptr<MarkupNode> root = parse_markup(text, MarkupMode::kHtml);
     ChandraBuilder builder(writer);
@@ -856,7 +856,8 @@ bool map_chandra_html(const std::string& text, const PageContext& page, docv1::D
         *error = "Chandra HTML contains no document content";
         return false;
     }
-    return writer.finish(error, "Chandra", true);
+    return writer.finish(error, "Chandra",
+                         blank_page ? EmptyPage::kDeclaredEmpty : EmptyPage::kMappingFailure);
 }
 
 }  // namespace vlm::mapping

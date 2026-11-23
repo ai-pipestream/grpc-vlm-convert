@@ -960,11 +960,24 @@ void LayoutWriter::link_adjacent_captions(const std::vector<size_t>& starts,
     }
 }
 
+EmptyPage blank_reply_or_failure(const std::string& text) {
+    return trim(text).empty() ? EmptyPage::kBlankReply : EmptyPage::kMappingFailure;
+}
+
 bool LayoutWriter::finish(std::string* error, const std::string& format_name,
-                          bool allow_empty) {
-    if (entries_.empty() && !allow_empty) {
-        *error = format_name + " response produced no document items";
-        return false;
+                          EmptyPage empty) {
+    if (entries_.empty()) {
+        switch (empty) {
+            case EmptyPage::kMappingFailure:
+                *error = format_name + " response produced no document items";
+                return false;
+            case EmptyPage::kBlankReply:
+                add_warning(warnings_, vlmv1::PAGE_WARNING_CODE_EMPTY_RESPONSE,
+                            format_name + ": the model returned no text for this page", "");
+                break;
+            case EmptyPage::kDeclaredEmpty:
+                break;
+        }
     }
     auto children_of = [&](Ref ref) -> google::protobuf::RepeatedPtrField<docv1::RefItem>* {
         switch (ref.kind) {

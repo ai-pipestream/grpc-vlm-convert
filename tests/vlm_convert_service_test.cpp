@@ -65,6 +65,8 @@ std::string base64_decode(const std::string& encoded) {
 //   RAWTEXT → prose without markup (mapping failure for DocTags)
 //   PICTURES → canned DocTags with two full-page pictures
 //   DOTSPAGE → canned dots.ocr layout JSON
+//   DOTSPROSE → prose where a dots.ocr layout was asked for
+//   BLANKREPLY → an empty answer
 //   else    → canned DocTags naming the marker
 struct FakeVlm {
     httplib::Server server;
@@ -159,6 +161,10 @@ struct FakeVlm {
                 content =
                     "[{\"bbox\": [10, 10, 200, 40], \"category\": \"Title\", \"text\": "
                     "\"# Dots Title\"}]";
+            } else if (png.contains("DOTSPROSE")) {
+                content = "I cannot read this page.";
+            } else if (png.contains("BLANKREPLY")) {
+                content = "";
             } else if (png.contains("RAWTEXT")) {
                 content = "just plain words with no markup";
             } else if (png.contains("PICTURES")) {
@@ -663,6 +669,52 @@ void verify_page_warnings(const std::shared_ptr<grpc::Channel>& channel) {
         require(document.document().tables(0).data().num_cols() == 250,
                 "the table keeps the columns within the cap");
     }
+}
+
+// A layout answer the mapper builds nothing from is never a converted blank
+// page. Prose where a layout was asked for comes back as PageRaw with the
+// model's text; an empty answer is an empty fragment that says so. Both name
+// the generation, since neither has an item to carry it.
+void verify_unusable_layout_answers(const std::shared_ptr<grpc::Channel>& channel) {
+    vlmv1::ConvertOptions options;
+    options.set_response_format(vlmv1::RESPONSE_FORMAT_DOTS_JSON);
+    Collected out = convert(channel, options,
+                            {page(1, "DOTSPROSE1"), page(2, "BLANKREPLY2"), page(3, "DOTSPAGE3")});
+    require(out.status.ok(), "the stream ends OK: " + out.status.error_message());
+    require(out.raws.size() == 1 && out.documents.size() == 2,
+            "prose is a PageRaw, the blank answer and the layout are PageDocuments: raws=" +
+                std::to_string(out.raws.size()) +
+                " documents=" + std::to_string(out.documents.size()));
+
+    const vlmv1::PageRaw& raw = out.raws[0];
+    require(raw.page_no() == 1 && raw.text() == "I cannot read this page.",
+            "the PageRaw keeps the model's text");
+    require(!raw.error().empty(), "the PageRaw says why the answer did not map");
+    require(raw.has_generation() && raw.generation().model() == "served-granite" &&
+                raw.generation().stop_reason() == docv1::VLM_STOP_REASON_LENGTH,
+            "the PageRaw names the generation and how it stopped");
+
+    for (const vlmv1::PageDocument& document : out.documents) {
+        require(document.has_generation() &&
+                    document.generation().model() == "served-granite" &&
+                    document.generation().finish_reason() == "length",
+                "every PageDocument names its generation");
+        if (document.page_no() == 3) {
+            require(document.document().texts_size() == 1 && document.warnings_size() == 0,
+                    "a mapped layout carries its item and no warning");
+            continue;
+        }
+        require(document.page_no() == 2, "the blank answer is page 2");
+        require(document.document().texts_size() == 0 &&
+                    document.document().pictures_size() == 0 &&
+                    document.document().tables_size() == 0,
+                "a blank answer has no items");
+        require(document.warnings_size() == 1 &&
+                    document.warnings(0).code() == vlmv1::PAGE_WARNING_CODE_EMPTY_RESPONSE,
+                "a blank answer carries the empty-response warning");
+    }
+    require(out.complete.pages_ok() == 2 && out.complete.pages_failed() == 1,
+            "the trailer counts the PageRaw as failed");
 }
 
 // With logprobs off (an endpoint that rejects them), calls omit the
@@ -1200,6 +1252,7 @@ int main() {
         verify_stop_and_max_tokens(server.channel, &fake);
         verify_alternatives(server.channel, &fake);
         verify_page_warnings(server.channel);
+        verify_unusable_layout_answers(server.channel);
         verify_logprobs_off(&fake);
         verify_abort_on_error(server.channel);
         verify_error_matrix(server.channel);

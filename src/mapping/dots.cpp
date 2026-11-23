@@ -2,8 +2,14 @@
 // JSON array of {"bbox": [x1, y1, x2, y2], "category": ..., "text": ...}
 // elements in reading order. Boxes are pixels of the image the model saw
 // after Qwen2-VL resizing, rescaled to the page. Text is Markdown with
-// inline HTML; tables are HTML; a fenced block is code. Malformed output
-// degrades to an empty page, never an error (docling's behavior).
+// inline HTML; tables are HTML; a fenced block is code.
+//
+// Docling degrades malformed output to an empty page. This mapper does
+// not: an answer that is prose, a refusal, JSON broken beyond repair, or a
+// layout of elements it builds nothing from is a mapping failure, so the
+// caller gets the model's text back as PageRaw instead of a blank page
+// that reads as converted. Only "[]", the model saying the page is empty,
+// and a blank answer (reported with a warning) are an empty page.
 
 #include <charconv>
 #include <cmath>
@@ -40,6 +46,22 @@ std::string clean_json(const std::string& raw) {
         return text.substr(0, brace + 1) + "]";
     }
     return text;
+}
+
+// True when the array the model wrote is itself empty and closed ("[]",
+// fenced or not): the model declaring a page with no layout elements.
+// clean_json also answers "[]" for prose and for an array cut off before
+// its first complete object, which is why this reads the raw text.
+bool declares_empty_layout(const std::string& raw) {
+    size_t at = raw.find('[');
+    if (at == std::string::npos) {
+        return false;
+    }
+    at++;
+    while (at < raw.size() && std::isspace(static_cast<unsigned char>(raw[at])) != 0) {
+        at++;
+    }
+    return at < raw.size() && raw[at] == ']';
 }
 
 // Python float() of one JSON value: numbers, booleans and numeric strings.
@@ -139,11 +161,12 @@ bool map_dots_json(const std::string& text, const PageContext& page, docv1::Docu
                    std::string* error, std::vector<vlmv1::PageWarning>* warnings) {
     LayoutWriter w(page, out, warnings);
     if (trim(text).empty()) {
-        return w.finish(error, "dots.ocr", /*allow_empty=*/true);
+        return w.finish(error, "dots.ocr", EmptyPage::kBlankReply);
     }
     const nlohmann::json elements = nlohmann::json::parse(clean_json(text), nullptr, false);
     if (elements.is_discarded() || !elements.is_array()) {
-        return w.finish(error, "dots.ocr", /*allow_empty=*/true);
+        *error = "dots.ocr response is not a JSON array of layout elements";
+        return false;
     }
     // Boxes are on the Qwen2-VL input grid of the page raster.
     const auto [model_w, model_h] = qwen2vl_image_size(page.width, page.height);
@@ -227,7 +250,9 @@ bool map_dots_json(const std::string& text, const PageContext& page, docv1::Docu
         }
     }
     w.link_adjacent_captions(starts, caption_blocks, /*code_owners=*/true);
-    return w.finish(error, "dots.ocr", /*allow_empty=*/true);
+    return w.finish(error, "dots.ocr",
+                    declares_empty_layout(text) ? EmptyPage::kDeclaredEmpty
+                                                : EmptyPage::kMappingFailure);
 }
 
 }  // namespace vlm::mapping
