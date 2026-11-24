@@ -1382,7 +1382,8 @@ void verify_page_crop_byte_cap(FakeVlm* fake) {
             "the fixture raster crops");
     vlm::Config config;
     config.endpoint = fake->endpoint();
-    config.max_page_crop_bytes = full_page.uri().size();  // one full-page crop fits
+    require(full_page.has_data() && !full_page.data().empty(), "the fixture crop has bytes");
+    config.max_page_crop_bytes = full_page.data().size();  // one full-page crop fits
     TestServer server(config);
     vlmv1::PageImage image;
     image.set_page_no(1);
@@ -1397,6 +1398,9 @@ void verify_page_crop_byte_cap(FakeVlm* fake) {
     require(document.document().pictures(0).has_image() &&
                 !document.document().pictures(1).has_image(),
             "only the crop within the configured cap is attached");
+    require(document.document().pictures(0).image().data() == full_page.data() &&
+                document.document().pictures(0).image().uri().empty(),
+            "the attached crop reaches the client as PNG bytes, not as a data: URI");
     require(document.warnings_size() == 1 &&
                 document.warnings(0).code() == vlmv1::PAGE_WARNING_CODE_PICTURE_IMAGES_SKIPPED,
             "the skipped crop is reported as a typed warning");

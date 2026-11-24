@@ -519,9 +519,12 @@ void verify_image_crop_adversarial() {
     require(vlm::mapping::crop_png_image(base64_decode(kGray4x3), 0, 0, 2, 2, 4, 3, &image),
             "grayscale PNG crops");
     require(image.size().width() == 2 && image.size().height() == 2, "grayscale crop size");
-    require(image.mimetype() == "image/png" &&
-                image.uri().starts_with("data:image/png;base64,"),
-            "grayscale crop re-encodes as a PNG data URI");
+    require(image.mimetype() == "image/png" && image.has_data() &&
+                image.data().starts_with("\x89PNG\r\n\x1a\n") &&
+                vlm::mapping::raster_size(image.data()) ==
+                    std::optional(std::pair<uint32_t, uint32_t>(2, 2)),
+            "grayscale crop re-encodes as PNG bytes in ImageRef.data");
+    require(image.uri().empty(), "the crop's bytes are not spelled as a data: URI");
     require(vlm::mapping::crop_png_image(base64_decode(kPalette2x2), 0, 0, 2, 2, 2, 2, &image),
             "palette PNG crops");
     require(vlm::mapping::crop_png_image(base64_decode(kRgba2x2), 0, 0, 2, 2, 2, 2, &image),
@@ -634,15 +637,17 @@ void verify_picture_crop_budget() {
             "one page-wide warning counts the skipped images");
 }
 
-// The data URIs a page carries are capped in bytes, so a page of large
-// crops cannot outgrow a client's message limit: the crop that would cross
-// the cap is dropped, and so is every later one, however small.
+// The crop bytes a page carries are capped, so a page of large crops
+// cannot outgrow a client's message limit: the crop that would cross the
+// cap is dropped, and so is every later one, however small. The cap counts
+// the PNG bytes themselves, which is what the fragment carries.
 void verify_picture_inline_byte_cap() {
     const std::string gray = base64_decode(kGray4x3);
     docv1::ImageRef image;
     require(vlm::mapping::crop_png_image(gray, 0, 0, 4, 3, 4, 3, &image),
             "the full-page crop attaches under the default cap");
-    const size_t full_page = image.uri().size();
+    const size_t full_page = image.data().size();
+    require(full_page > 0, "the full-page crop has bytes");
     const size_t cap = full_page + full_page / 2;  // one full-page crop fits, two do not
     {
         vlm::mapping::PageRaster raster(gray, 4, 3, {.max_inline_bytes = cap});
@@ -652,7 +657,8 @@ void verify_picture_inline_byte_cap() {
         require(raster.crop(0, 0, 4, 3, &image) ==
                     vlm::mapping::PageRaster::Crop::kOverByteCap,
                 "a crop that would cross the byte cap is refused");
-        require(!image.has_size() && image.uri().empty(), "a refused crop leaves image untouched");
+        require(!image.has_size() && !image.has_data() && image.uri().empty(),
+                "a refused crop leaves image untouched");
         require(raster.crop(0, 0, 1, 1, &image) ==
                     vlm::mapping::PageRaster::Crop::kOverByteCap,
                 "every later crop is refused too, however small");

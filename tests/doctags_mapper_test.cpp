@@ -3,6 +3,7 @@
 // tables via OTSL, and the no-markup failure that drives PageRaw.
 
 #include "fixture.h"
+#include "mapping/image_crop.h"
 #include "mapping/mapper.h"
 
 namespace docv1 = ai::pipestream::document::v1;
@@ -482,8 +483,11 @@ void verify_picture_crop() {
     require(cropped.image().mimetype() == "image/png", "crop mimetype");
     require(cropped.image().size().width() == 50 && cropped.image().size().height() == 25,
             "crop scales the box into raster pixels");
-    require(cropped.image().uri().starts_with("data:image/png;base64,"),
-            "crop is a PNG data URI");
+    require(cropped.image().has_data() &&
+                vlm::mapping::raster_size(cropped.image().data()) ==
+                    std::optional(std::pair<uint32_t, uint32_t>(50, 25)),
+            "the crop rides as its own PNG bytes");
+    require(cropped.image().uri().empty(), "the crop's bytes are not spelled as a data: URI");
     // No locs → no crop, but the PictureItem still lands.
     require(!doc.pictures(1).has_image(), "no box, no crop, picture still emitted");
 

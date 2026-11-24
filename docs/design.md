@@ -413,13 +413,15 @@ children are the chunk's items, all stamped with the chunk's first
 `<inline>` stays a ListItem.
 
 Picture and chart regions are cropped from the page raster (stb) and
-attached as `ImageRef` PNG data URIs; a missing or undecodable raster
+attached as PNG bytes in `ImageRef.data` (mimetype `image/png`, `uri`
+unset: the bytes are never spelled as a base64 `data:` URI); a missing or undecodable raster
 still yields the PictureItem, just without an image. The raster is
 decoded once per page, on the first crop, and never when its header
 claims more than 40 million pixels; a page spends at most 100 crops and
 twice its own pixels on them, so a model repeating `<picture>` cannot
-multiply the page into its fragment. The data URIs a page carries are
-also capped in bytes (`GRPC_VLM_MAX_PAGE_CROP_BYTES`, default 3 MiB):
+multiply the page into its fragment. The crop bytes a page carries are
+also capped (`GRPC_VLM_MAX_PAGE_CROP_BYTES`, default 3 MiB, counted on
+the PNG bytes themselves):
 one near-full-page crop at 300 DPI can come close to the 4 MiB receive
 limit gRPC clients default to, and a `PageDocument` past the client's
 limit fails its whole stream. The first crop that would cross the cap
