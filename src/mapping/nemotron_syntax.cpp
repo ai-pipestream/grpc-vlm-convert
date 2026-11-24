@@ -300,7 +300,42 @@ bool NemotronBlock::operator<(const NemotronBlock& o) const {
            std::tie(o.label, o.x1, o.y1, o.x2, o.y2, o.text);
 }
 
-std::vector<NemotronBlock> nemotron_v35_blocks(std::string_view content) {
+namespace {
+
+// The bytes of `segment` that are a block's own text: coordinate tokens,
+// generation artifacts and surrounding whitespace removed.
+size_t own_text_bytes(std::string_view segment) {
+    std::string text;
+    size_t pos = 0;
+    while (pos < segment.size()) {
+        const size_t at = segment.find("<x_", pos);
+        if (at == std::string_view::npos) {
+            break;
+        }
+        double x = 0;
+        double y = 0;
+        if (const auto end = coord_token(segment, at, &x, &y)) {
+            text += segment.substr(pos, at - pos);
+            pos = *end;
+        } else {
+            text += segment.substr(pos, at + 1 - pos);
+            pos = at + 1;
+        }
+    }
+    text += segment.substr(pos);
+    // The end-of-sequence markers a model appends are not page content.
+    for (const std::string_view marker : {"</s>", "<s>", "<|endoftext|>"}) {
+        for (size_t at = text.find(marker); at != std::string::npos; at = text.find(marker, at)) {
+            text.erase(at, marker.size());
+        }
+    }
+    return trim(remove_artifacts(std::move(text))).size();
+}
+
+}  // namespace
+
+std::vector<NemotronBlock> nemotron_v35_blocks(std::string_view content,
+                                               NemotronUnread* unread) {
     std::vector<NemotronBlock> blocks;
     std::set<NemotronBlock> seen;
     size_t start = 0;
@@ -331,6 +366,9 @@ std::vector<NemotronBlock> nemotron_v35_blocks(std::string_view content) {
         }
         at = *end - 1;
         if (coords.size() < 2) {
+            if (unread != nullptr && own_text_bytes(segment) > 0) {
+                unread->blocks_without_corners++;
+            }
             continue;
         }
         const Coord& first = coords.front();
@@ -346,6 +384,9 @@ std::vector<NemotronBlock> nemotron_v35_blocks(std::string_view content) {
         if (seen.insert(block).second) {
             blocks.push_back(std::move(block));
         }
+    }
+    if (unread != nullptr && start < content.size()) {
+        unread->trailing_bytes = own_text_bytes(content.substr(start));
     }
     return blocks;
 }

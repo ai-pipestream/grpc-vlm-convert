@@ -202,10 +202,27 @@ std::vector<NemotronBlock> nemotron_structural_regions(std::string_view content)
     return regions;
 }
 
+void report_nemotron_unread(const NemotronUnread& unread,
+                            std::vector<vlmv1::PageWarning>* warnings) {
+    if (unread.blocks_without_corners > 0) {
+        add_warning(warnings, vlmv1::PAGE_WARNING_CODE_ELEMENTS_SKIPPED,
+                    std::to_string(unread.blocks_without_corners) +
+                        " block(s) with text and fewer than two corner tokens were not mapped",
+                    "");
+    }
+    if (unread.trailing_bytes > 0) {
+        add_warning(warnings, vlmv1::PAGE_WARNING_CODE_OUTPUT_TRUNCATED,
+                    "the answer breaks off after its last complete block; " +
+                        std::to_string(unread.trailing_bytes) +
+                        " byte(s) of an unfinished block were not mapped",
+                    "");
+    }
+}
+
 std::vector<NemotronCrop> plan_nemotron_crops(int64_t width, int64_t height,
                                               std::string_view parser,
                                               const std::string* detection,
-                                              bool union_regions) {
+                                              bool union_regions, size_t* over_cap) {
     std::vector<NemotronBlock> regions;
     for (NemotronBlock& region :
          nemotron_structural_regions(detection != nullptr ? *detection : parser)) {
@@ -223,6 +240,9 @@ std::vector<NemotronCrop> plan_nemotron_crops(int64_t width, int64_t height,
                 regions.push_back(std::move(region));
             }
         }
+    }
+    if (over_cap != nullptr) {
+        *over_cap = regions.size() > kMaxNemotronCrops ? regions.size() - kMaxNemotronCrops : 0;
     }
     if (regions.size() > kMaxNemotronCrops) {
         regions.resize(kMaxNemotronCrops);

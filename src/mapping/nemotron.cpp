@@ -16,6 +16,7 @@
 #include <set>
 
 #include "layout.h"
+#include "nemotron_multipass.h"
 #include "nemotron_syntax.h"
 
 namespace vlm::mapping {
@@ -176,8 +177,10 @@ struct Region {
 
 // finditer over <x_><y_>(.*?)<x_><y_><class_..>: the first closing
 // triple after each opening pair. Without any closing triple after an
-// opening, no later opening has one either.
-std::vector<Region> nemotron_v2_regions(std::string_view text) {
+// opening, no later opening has one either. `unterminated` receives the
+// size of what follows such an opening: a region the answer broke off in.
+std::vector<Region> nemotron_v2_regions(std::string_view text, size_t* unterminated) {
+    *unterminated = 0;
     std::vector<Region> regions;
     size_t i = 0;
     while (i < text.size()) {
@@ -206,6 +209,7 @@ std::vector<Region> nemotron_v2_regions(std::string_view text) {
             }
         }
         if (!match_end) {
+            *unterminated = trim(remove_artifacts(std::string(text.substr(*body_start)))).size();
             break;
         }
         region.text = std::string(text.substr(*body_start, close - *body_start));
@@ -543,7 +547,15 @@ bool map_nemotron_parse_v2(const std::string& text, const PageContext& page,
                            std::vector<vlmv1::PageWarning>* warnings) {
     LayoutWriter w(page, out, warnings);
     std::optional<Ref> list;
-    for (const Region& region : nemotron_v2_regions(text)) {
+    size_t unterminated = 0;
+    const std::vector<Region> regions = nemotron_v2_regions(text, &unterminated);
+    if (unterminated > 0) {
+        add_warning(warnings, vlmv1::PAGE_WARNING_CODE_OUTPUT_TRUNCATED,
+                    "the last region opens and never closes; " + std::to_string(unterminated) +
+                        " byte(s) of it were not mapped",
+                    "");
+    }
+    for (const Region& region : regions) {
         const Box box = nemotron_v2_box(region, page);
         const std::string raw = trim(remove_artifacts(region.text));
         if (region.label != "List-item") {
@@ -598,7 +610,9 @@ bool map_nemotron_parse_v3_5(const std::string& text, const PageContext& page,
     std::optional<Ref> toc;
     std::vector<size_t> starts;
     std::vector<size_t> caption_blocks;
-    const std::vector<NemotronBlock> blocks = nemotron_v35_blocks(text);
+    NemotronUnread unread;
+    const std::vector<NemotronBlock> blocks = nemotron_v35_blocks(text, &unread);
+    report_nemotron_unread(unread, warnings);
     for (size_t index = 0; index < blocks.size(); index++) {
         const NemotronBlock& block = blocks[index];
         starts.push_back(w.body_size());

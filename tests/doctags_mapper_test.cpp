@@ -657,6 +657,58 @@ void verify_inline_group() {
             "body children follow token order");
 }
 
+// A <loc_> token that is not a number leaves its item without a box: the
+// item is kept on the full-page box and the page says so. A <link_> token
+// whose target is not a number is dropped and counted.
+void verify_unreadable_tokens_are_reported() {
+    {
+        std::vector<vlmv1::PageWarning> warnings;
+        docv1::Document doc;
+        std::string error;
+        require(vlm::mapping::map_doctags(
+                    "<doctag>"
+                    "<text><loc_50><loc_abc><loc_400><loc_260>Bad location.</text>"
+                    "<text><loc_50><loc_300><loc_400><loc_360>Good location.</text>"
+                    "</doctag>",
+                    page_context(), &doc, &error, &warnings),
+                "a bad loc token still maps: " + error);
+        require(doc.texts_size() == 2, "both paragraphs are kept");
+        const auto& bad = doc.texts(0).text().base().prov(0).bbox();
+        require(bad.l() == 0 && bad.t() == 0 && bad.r() == 1000 && bad.b() == 1000,
+                "the item with the unreadable token sits on the full-page box");
+        require(warnings.size() == 1 &&
+                    warnings[0].code() == vlmv1::PAGE_WARNING_CODE_LOCATION_UNREADABLE &&
+                    warnings[0].message().starts_with("1 "),
+                "the unreadable location token is reported");
+    }
+    {
+        std::vector<vlmv1::PageWarning> warnings;
+        docv1::Document doc;
+        std::string error;
+        require(vlm::mapping::map_doctags(
+                    "<doctag><key_value_region><loc_10><loc_10><loc_400><loc_400>"
+                    "<key_0><loc_10><loc_10><loc_100><loc_40>Name<link_x></key_0>"
+                    "<value_1><loc_110><loc_10><loc_300><loc_40>Ada</value_1>"
+                    "</key_value_region></doctag>",
+                    page_context(), &doc, &error, &warnings),
+                "a bad link token still maps: " + error);
+        require(warnings.size() == 1 &&
+                    warnings[0].code() == vlmv1::PAGE_WARNING_CODE_ELEMENTS_SKIPPED &&
+                    warnings[0].message().starts_with("1 "),
+                "the unreadable link token is reported");
+    }
+    {
+        std::vector<vlmv1::PageWarning> warnings;
+        docv1::Document doc;
+        std::string error;
+        require(vlm::mapping::map_doctags(
+                    "<doctag><text><loc_50><loc_200><loc_400><loc_260>Fine.</text></doctag>",
+                    page_context(), &doc, &error, &warnings) &&
+                    warnings.empty(),
+                "a well-formed page reports nothing");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -678,6 +730,7 @@ int main() {
         verify_key_value_region();
         verify_list_groups();
         verify_inline_group();
+        verify_unreadable_tokens_are_reported();
     } catch (const std::exception& error) {
         std::println(stderr, "{}", error.what());
         return 1;
