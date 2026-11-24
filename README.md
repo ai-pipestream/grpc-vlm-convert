@@ -4,8 +4,8 @@ gRPC collector that parses pages with a vision-language model (VLM) and
 maps the result into the pipestream document schema
 (`ai.pipestream.document.v1`), as an alternate parse path for gRParse.
 
-This repo is a spec plus a standalone C++ gRPC server. It is not
-PipeStream core. The VLM itself is a separate server this binary calls
+This repo is a spec plus a standalone C++ gRPC server. The VLM itself is
+a separate server this binary calls
 over an OpenAI-compatible HTTP endpoint; no model weights are loaded or
 downloaded here.
 
