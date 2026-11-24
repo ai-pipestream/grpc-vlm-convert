@@ -65,6 +65,11 @@ struct Config {
     size_t vlm_timeout_seconds = 300;
     // 0 disables the stdout metrics line.
     size_t metrics_interval_seconds = 60;
+    // Seconds between health probes of the configured endpoint's model
+    // list (GRPC_VLM_HEALTH_PROBE_SECONDS). Health is NOT_SERVING until a
+    // probe passes and whenever one fails. 0 turns the probe off: health
+    // then says only whether an endpoint is configured.
+    size_t health_probe_seconds = 15;
     // HTTP/JSON front-end port (POST /v1/convert, /v1/convert/stream,
     // GET /healthz). 0 disables the HTTP listener.
     size_t http_port = 50059;

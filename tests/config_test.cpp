@@ -22,7 +22,7 @@ constexpr const char* kAllVars[] = {
     "GRPC_VLM_MAX_STREAM_BUFFERED_BYTES", "GRPC_VLM_MAX_BUFFERED_BYTES",
     "GRPC_VLM_HTTP_HOST",            "GRPC_VLM_HTTP_MAX_BODY_BYTES",
     "GRPC_VLM_HTTP_TOKEN",           "GRPC_VLM_LOGPROBS",
-    "GRPC_VLM_MAX_PAGE_CROP_BYTES",
+    "GRPC_VLM_MAX_PAGE_CROP_BYTES",  "GRPC_VLM_HEALTH_PROBE_SECONDS",
 };
 
 void clear_env() {
@@ -196,6 +196,13 @@ void verify_range_validation() {
     ::setenv("GRPC_VLM_MAX_PAGE_BYTES", "1024", 1);
     ::setenv("GRPC_VLM_METRICS_INTERVAL_SECONDS", "0", 1);
     ::setenv("GRPC_VLM_MAX_PAGE_CROP_BYTES", "1024", 1);
+    require(vlm::load_config_from_env().health_probe_seconds == 15,
+            "the endpoint is probed every 15 s by default");
+    require(rejects("GRPC_VLM_HEALTH_PROBE_SECONDS", "soon"), "a probe interval that is no number");
+    require(rejects("GRPC_VLM_HEALTH_PROBE_SECONDS", "3601"), "a probe interval above an hour");
+    ::setenv("GRPC_VLM_HEALTH_PROBE_SECONDS", "0", 1);
+    require(vlm::load_config_from_env().health_probe_seconds == 0,
+            "probe interval 0 (probe off) is legal");
     const vlm::Config config = vlm::load_config_from_env();
     require(config.max_page_bytes == 1024, "page bytes at the minimum");
     require(config.max_page_crop_bytes == 1024, "crop bytes at the minimum");

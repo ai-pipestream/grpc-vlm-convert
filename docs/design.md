@@ -82,6 +82,37 @@ Events arrive in completion order, not page order:
    call or the mapping failed.
 3. `ConvertComplete`: pages started / ok / failed.
 
+A `PageRaw` says why its page failed twice: `error` in words, and
+`error_code` as a value to branch on.
+
+| `PageErrorCode` | The page failed because |
+| --- | --- |
+| `ENDPOINT_UNREACHABLE` | no connection to the endpoint could be made or kept |
+| `ENDPOINT_HTTP_ERROR` | the endpoint answered with a status other than 200 |
+| `TIMEOUT` | the call outlived the per-page budget |
+| `MALFORMED_RESPONSE` | a 200 that is not a chat completion with content |
+| `UNMAPPABLE_OUTPUT` | the model answered outside the format asked for (`text` holds it) |
+| `INVALID_PAGE` | the page names no size and its PNG header gives none |
+| `INTERNAL` | this server failed while converting it |
+
+For `ENDPOINT_HTTP_ERROR` the event also carries `endpoint_error`: the
+HTTP status, and the message and type the endpoint's error reply gave
+(the OpenAI error object, or the `error` / `detail` / `message` string or
+plain-text body other servers send), cut to 2048 and 128 bytes with
+`message_truncated` set when cut. That is what tells an image the model
+refused from a server that ran out of memory; the same line goes to this
+server's log. A reply that is markup, or larger than 64 KiB, is not read:
+the status is still reported and nothing is guessed.
+
+A stream does not end OK when the endpoint served none of it. If no page
+converted and every page failed with one of the first three codes, the
+page events and the trailer are delivered as usual and the status is then
+`UNAVAILABLE`, naming the page count and the first failure; the metrics
+line counts it under `streams{unavailable=}`, not `converted=`. A stream
+where the model answered at all, however badly, still ends OK with its
+failures in the events and the trailer. A client that leaves before the
+trailer is written ends `CANCELLED` and is not counted as converted.
+
 A `PageDocument` with no items is never a silent result. Every
 `PageDocument` and every `PageRaw` whose model call succeeded carries the
 call's `generation` (model, endpoint origin, stop reason, token cost), so a
@@ -106,22 +137,59 @@ A UI paints `PageDocument` immediately. gRParse merges fragments with
 the same additive rules as other collectors; it must not hold page 4
 until page 3 arrives.
 
+### Health
+
+This process holds no model, so its health is the VLM endpoint's. With no
+endpoint a stream could use, or one that does not answer, every page of
+every stream fails; a health check that said SERVING then would route an
+orchestrator's traffic to a service that cannot do its one job.
+
+An `EndpointMonitor` probes the configured endpoint once before the
+listening line is printed and then every `GRPC_VLM_HEALTH_PROBE_SECONDS`
+(default 15): one `GET` of the route beside its chat completions one
+(`/v1/models` under the same path prefix and query), with the API key when
+one is set. Any answer below 500 other than 401 and 403 is serving (an
+endpoint without a model list answers 404, which still proves it is
+reachable). Nothing answering within 5 s, a 5xx (a model still loading
+answers 503) and 401/403 (the endpoint refuses this server's credentials)
+are not serving. The verdict sets `grpc.health.v1.Health` for the overall
+status and for `ai.pipestream.vlm.v1.VlmConvertService`, drives `/healthz`
+(200 `ok` or 503 with the reason), and is logged on every change.
+
+With `GRPC_VLM_ENDPOINT` empty there is nothing to probe: health is
+serving only when per-request overrides are allowed, since a request can
+then bring its own endpoint, and not serving otherwise. A probe interval
+of 0 turns the probe off; health then reflects configuration alone.
+
+Health gates nothing inside the server: a stream that arrives while the
+endpoint is down still runs and fails page by page, exactly as before.
+
 ### HTTP shim
 
 The same binary also serves an HTTP/JSON front end (`GRPC_VLM_HTTP_PORT`,
-default 50059; 0 or empty disables it): `POST /v1/convert` (one JSON
-object in, `{"events": [...]}` out), `POST /v1/convert/stream` (chunked
-NDJSON, one event per line as it happens), and `GET /healthz`. The shim
+default 50059; 0 or empty disables it): `POST /v1/convert` (one
+`ConvertHttpRequest` in, one `ConvertHttpResponse` out),
+`POST /v1/convert/stream` (chunked NDJSON, one event per line as it
+happens), and `GET /healthz`. The shim
 is a framing adapter only: `VlmConvertServiceImpl::ConvertPagesCore`
 takes the stream as three callables (read / write / cancelled), and the
 gRPC override and the HTTP handlers both drive that one pipeline, so
 concurrency caps, byte and page caps, `abort_on_error`, completion
 order, and the error matrix (INVALID_ARGUMENT → 400,
 PERMISSION_DENIED → 403, RESOURCE_EXHAUSTED → 413, UNIMPLEMENTED →
-501, else 500) cannot drift
-between transports. Message bodies are canonical proto3 JSON
-(`MessageToJsonString` / `JsonStringToMessage`); nlohmann/json touches
-only the `{"options", "pages"}` envelope.
+501, UNAVAILABLE → 503, else 500) cannot drift
+between transports. The bodies are messages too
+(`vlm_convert_http.proto`: `ConvertHttpRequest`, `ConvertHttpResponse`,
+`ConvertHttpError` with a `ConvertHttpErrorCode`), each parsed or printed
+whole by one protobuf call (`JsonStringToMessage` /
+`MessageToJsonString`). The shim holds no JSON library and builds no JSON
+text: the events of a buffered answer are kept as messages and printed
+once with their body, and a request is read in one pass, so a field the
+request message does not have is refused instead of read past. That file
+is not part of the gRPC contract and gRParse does not vendor it. An event
+protobuf cannot print fails the conversion INTERNAL on both routes (500
+on the buffered one, an error line on the stream), never as the caller
+having left.
 
 The shim binds `GRPC_VLM_HTTP_HOST`, loopback by default: it converts
 pages, and pays for VLM calls, for whoever reaches it, so any other host
@@ -399,8 +467,10 @@ score. `Hypothesis.range` is never set for the same reason as above.
 Every emitted item carries two sources: the `CollectorSource`
 (`vlm-convert`, the resolved model name, this server's version) and a
 `GenerationSource` describing the call that produced the page — the
-model the endpoint says answered (the requested name only when it
-echoes none), the endpoint origin (scheme, host and port; userinfo,
+model the endpoint says answered (left unset when it names none: the
+requested name is in the `CollectorSource`, and an endpoint that serves
+its one model whatever it is asked for would otherwise have its answers
+recorded under a model that never ran), the endpoint origin (scheme, host and port; userinfo,
 path and query are dropped because deployments hide tokens there), the
 `finish_reason`
 verbatim, and `prompt_tokens` / `completion_tokens` when the endpoint
@@ -511,6 +581,14 @@ whatever the preset (section 3, Nemotron Parse double and triple pass).
   still runs (`abort_on_error` false). The 503 is retried first (the
   client test counts the attempts), with test backoff pinned to zero.
 - No endpoint configured → `FAILED_PRECONDITION`.
+- Every way a page fails carries its `PageErrorCode`, an HTTP error its
+  `endpoint_error`; a stream whose pages all failed at the endpoint
+  (503s, a refusal, nothing listening, a timeout) ends `UNAVAILABLE`
+  after its trailer and counts as `unavailable`, while one where the
+  model answered ends OK.
+- The HTTP bodies read back as `ConvertHttpResponse` messages; an
+  unknown request field is 400; an unprintable event is INTERNAL on both
+  routes (through the gateway's printer hook).
 - Formats 6-13 (`docling-formats-test`): one answer per format shaped
   like docling's own tests and fixtures, checked for the items docling
   builds; MinerU2 fails typed. The service test covers

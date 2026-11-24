@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -65,6 +66,11 @@ struct VlmCall {
     std::function<bool()> cancelled{};
 };
 
+// How much of an endpoint's error reply a VlmResult keeps. An error page
+// can be megabytes; the reason it failed fits in a few lines.
+inline constexpr size_t kMaxEndpointMessageBytes = 2048;
+inline constexpr size_t kMaxEndpointTypeBytes = 128;
+
 // One alternate reading the endpoint offered for a generated token.
 struct TokenAlternative {
     // The alternate token, verbatim.
@@ -75,16 +81,47 @@ struct TokenAlternative {
     double logprob = 0.0;
 };
 
+// Why a call produced no answer, for a caller that branches on it.
+enum class VlmFailure {
+    // The call answered (VlmResult::ok).
+    kNone,
+    // The endpoint string cannot be called. The service validates it
+    // before a page is read, so this is a backstop.
+    kInvalidEndpoint,
+    // The caller's cancel probe cut the call short.
+    kCancelled,
+    // The call's whole budget ran out, retries included.
+    kTimeout,
+    // No connection could be made or kept.
+    kUnreachable,
+    // The endpoint answered with a status other than 200.
+    kHttpStatus,
+    // A 200 whose body is not a chat completion with message content.
+    kMalformedResponse,
+};
+
 // The endpoint's answer for one page.
 struct VlmResult {
     // True when the endpoint answered 200 with a parseable chat
-    // completion; false means error carries the reason (HTTP status or
-    // transport failure).
+    // completion; false means failure says why and error says it in words.
     bool ok = false;
     // choices[0].message.content when ok.
     std::string text;
     // Failure detail when !ok.
     std::string error;
+    // Why the call failed; kNone when ok.
+    VlmFailure failure = VlmFailure::kNone;
+    // With kHttpStatus: the status of the last reply, and what its body
+    // said went wrong. The message is the OpenAI error object's
+    // ("error.message") or what other servers send in its place (an
+    // "error" or "detail" string, a top-level "message", a plain-text
+    // body), cut to kMaxEndpointMessageBytes on a character boundary with
+    // endpoint_message_truncated set; the type is "error.type", cut to
+    // kMaxEndpointTypeBytes. Both empty when the body carried neither.
+    int http_status = 0;
+    std::string endpoint_message;
+    std::string endpoint_type;
+    bool endpoint_message_truncated = false;
     // True when the caller's cancel probe cut the call short: nothing is
     // known about the page, and nobody is waiting for it.
     bool cancelled = false;
@@ -147,6 +184,18 @@ std::string endpoint_error(const std::string& endpoint);
 // path prefix or query is a different endpoint. False when either does
 // not parse.
 bool same_endpoint(const std::string& left, const std::string& right);
+
+// Where an endpoint lists its models: the route beside its chat
+// completions one ("/v1/models" under the same path prefix, the query
+// kept, since deployments authenticate with it). The health probe asks
+// it. nullopt when the endpoint does not parse.
+struct ModelsRoute {
+    // "http://host[:port]".
+    std::string origin;
+    // Path plus query, e.g. "/base/v1/models?tenant=a".
+    std::string target;
+};
+std::optional<ModelsRoute> models_route(const std::string& endpoint);
 
 // The endpoint as it may be shown: scheme, host and port only. Userinfo,
 // path, query and fragment are dropped on purpose, because deployments put

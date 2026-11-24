@@ -61,6 +61,8 @@ std::string base64_decode(const std::string& encoded) {
 // The fake VLM: an OpenAI-compatible /v1/chat/completions that answers
 // from markers embedded in the uploaded PNG bytes:
 //   FAIL    → HTTP 503
+//   REFUSE  → HTTP 400 with an OpenAI error object saying why
+//   GARBAGE → a 200 that is not a chat completion
 //   MDPAGE  → canned markdown
 //   RAWTEXT → prose without markup (mapping failure for DocTags)
 //   PICTURES → canned DocTags with two full-page pictures
@@ -69,7 +71,8 @@ std::string base64_decode(const std::string& encoded) {
 //   BLANKREPLY → an empty answer
 //   else    → canned DocTags naming the marker
 // How the answer stopped follows the marker too: CUTOFF → "length" (cut at
-// max_tokens), FILTERED → "content_filter", else "stop".
+// max_tokens), FILTERED → "content_filter", else "stop". NOMODEL leaves
+// the "model" field out of the reply.
 struct FakeVlm {
     httplib::Server server;
     std::thread thread;
@@ -156,6 +159,17 @@ struct FakeVlm {
                 response.set_content("{\"error\":\"model overloaded\"}", "application/json");
                 return;
             }
+            if (png.contains("REFUSE")) {
+                response.status = 400;
+                response.set_content(
+                    R"({"error": {"message": "image too large", "type": "invalid_request_error"}})",
+                    "application/json");
+                return;
+            }
+            if (png.contains("GARBAGE")) {
+                response.set_content("not json at all", "text/plain");
+                return;
+            }
             std::string content;
             if (png.contains("MDPAGE")) {
                 content = "# Converted Page\n\nA markdown paragraph.\n";
@@ -210,6 +224,9 @@ struct FakeVlm {
                       {{{"token", "a"}, {"logprob", -0.1}, {"top_logprobs", alternates}},
                        {{"token", "b"}, {"logprob", -0.2}}}}}}}}},
             };
+            if (png.contains("NOMODEL")) {
+                reply.erase("model");
+            }
             response.set_content(reply.dump(), "application/json");
         });
         port = server.bind_to_any_port("127.0.0.1");
@@ -766,9 +783,173 @@ void verify_truncated_generation(const std::shared_ptr<grpc::Channel>& channel) 
             "a stream of whole answers counts no truncated page");
 }
 
+// GenerationSource.model is the model that answered. An endpoint that does
+// not say which model that was leaves it unset: the requested name is a
+// request, already recorded in the collector source, and an endpoint that
+// serves one model whatever it is asked for would otherwise have its
+// answers recorded under a name it never ran.
+void verify_unreported_model_is_not_invented(const std::shared_ptr<grpc::Channel>& channel) {
+    vlmv1::ConvertOptions options;  // DocTags, granite-docling
+    options.set_top_logprobs(2);
+    Collected out = convert(channel, options, {page(1, "PAGE1-NOMODEL"), page(2, "PAGE2")});
+    require(out.status.ok() && out.documents.size() == 2, "both pages convert: " +
+                                                            out.status.error_message());
+    for (const vlmv1::PageDocument& document : out.documents) {
+        const auto& base = document.document().texts(0).section_header().base();
+        const auto& generation = base.source(1).generation();
+        require(base.source(0).collector().model() == "ibm-granite/granite-docling-258M",
+                "the collector source names the model that was asked for");
+        if (document.page_no() == 2) {
+            require(generation.model() == "served-granite" &&
+                        document.generation().model() == "served-granite",
+                    "an endpoint that names its model has it recorded");
+            continue;
+        }
+        require(generation.model().empty() && document.generation().model().empty(),
+                "an endpoint that names no model leaves the generation's model unset, got <" +
+                    generation.model() + ">");
+        require(generation.endpoint().starts_with("http://127.0.0.1:") &&
+                    generation.finish_reason() == "stop",
+                "the rest of the generation is still recorded");
+        const auto& alternatives = document.document().body().meta().alternatives();
+        require(alternatives.hypotheses_size() > 0 && !alternatives.has_created_by(),
+                "the page's alternates claim no model either");
+    }
+}
+
 // With logprobs off (an endpoint that rejects them), calls omit the
 // parameter, and a request for alternates, which need them, fails before a
 // page is paid for.
+// A failed page says why as a value a caller can branch on, and an HTTP
+// error keeps what the endpoint said: matching the English in `error` is
+// not how a caller should tell a dead endpoint from a model that answered
+// in the wrong format.
+void verify_page_errors_are_typed(const std::shared_ptr<grpc::Channel>& channel) {
+    vlmv1::ConvertOptions options;
+    vlmv1::PageImage sizeless = page(6, "NOSIZE6");
+    sizeless.set_width(0);
+    sizeless.set_height(0);
+    Collected out = convert(channel, options,
+                            {page(1, "PAGE1"), page(2, "FAIL2"), page(3, "REFUSE3"),
+                             page(4, "GARBAGE4"), page(5, "RAWTEXT5"), sizeless});
+    require(out.status.ok(), "a stream with a converted page ends OK: " +
+                                 out.status.error_message());
+    require(out.documents.size() == 1 && out.raws.size() == 5, "one page converts, five fail");
+    auto raw_of = [&](uint32_t page_no) -> const vlmv1::PageRaw& {
+        for (const vlmv1::PageRaw& raw : out.raws) {
+            if (raw.page_no() == page_no) {
+                return raw;
+            }
+        }
+        throw std::runtime_error("FAIL: no PageRaw for page " + std::to_string(page_no));
+    };
+    const vlmv1::PageRaw& overloaded = raw_of(2);
+    require(overloaded.error_code() == vlmv1::PAGE_ERROR_CODE_ENDPOINT_HTTP_ERROR,
+            "a 503 is an endpoint HTTP error");
+    require(overloaded.has_endpoint_error() && overloaded.endpoint_error().http_status() == 503 &&
+                overloaded.endpoint_error().message() == "model overloaded",
+            "the 503 carries its status and what the endpoint said");
+    const vlmv1::PageRaw& refused = raw_of(3);
+    require(refused.error_code() == vlmv1::PAGE_ERROR_CODE_ENDPOINT_HTTP_ERROR &&
+                refused.endpoint_error().http_status() == 400 &&
+                refused.endpoint_error().message() == "image too large" &&
+                refused.endpoint_error().type() == "invalid_request_error" &&
+                !refused.endpoint_error().message_truncated(),
+            "a 400 carries the endpoint's reason and its type");
+    require(refused.error().contains("HTTP 400") && refused.error().contains("image too large"),
+            "and the text says the same: " + refused.error());
+    const vlmv1::PageRaw& garbage = raw_of(4);
+    require(garbage.error_code() == vlmv1::PAGE_ERROR_CODE_MALFORMED_RESPONSE &&
+                !garbage.has_endpoint_error(),
+            "a 200 that is not a chat completion is a malformed response");
+    const vlmv1::PageRaw& unmapped = raw_of(5);
+    require(unmapped.error_code() == vlmv1::PAGE_ERROR_CODE_UNMAPPABLE_OUTPUT &&
+                !unmapped.text().empty() && !unmapped.has_endpoint_error(),
+            "an answer in the wrong format is unmappable output, with its text");
+    const vlmv1::PageRaw& bad_page = raw_of(6);
+    require(bad_page.error_code() == vlmv1::PAGE_ERROR_CODE_INVALID_PAGE,
+            "a page with no size anywhere is an invalid page");
+}
+
+// A stream on which the endpoint served nothing must not end OK, nor
+// count as converted: every page is still reported, the trailer still
+// arrives, and then the status is UNAVAILABLE.
+void verify_endpoint_failure_is_not_success(FakeVlm* fake) {
+    vlmv1::ConvertOptions options;
+    {
+        vlm::Config config;
+        config.endpoint = fake->endpoint();
+        TestServer server(config);
+        Collected out = convert(server.channel, options, {page(1, "FAIL1"), page(2, "FAIL2")});
+        require(out.status.error_code() == grpc::StatusCode::UNAVAILABLE,
+                "every page failing at the endpoint is UNAVAILABLE, got " +
+                    std::to_string(out.status.error_code()) + ": " + out.status.error_message());
+        require(out.status.error_message().contains("2 page") &&
+                    out.status.error_message().contains("HTTP 503"),
+                "the status says how many pages and why: " + out.status.error_message());
+        require(out.raws.size() == 2 && out.got_complete && out.complete_last,
+                "the page failures and the trailer still arrive first");
+        require(out.complete.pages_ok() == 0 && out.complete.pages_failed() == 2,
+                "the trailer counts them");
+        require(server.service->unavailable.load() == 1 && server.service->converted.load() == 0,
+                "the stream is counted as unavailable, not as converted");
+        require(server.service->pages_failed.load() == 2, "its pages are still counted");
+
+        // The model answering, however badly, is not the endpoint being
+        // down: these streams end OK with their failures reported.
+        Collected mixed = convert(server.channel, options, {page(1, "FAIL1"), page(2, "RAWTEXT2")});
+        require(mixed.status.ok() && mixed.raws.size() == 2 && mixed.complete.pages_ok() == 0,
+                "one endpoint failure beside one unmappable answer ends OK: " +
+                    mixed.status.error_message());
+        Collected garbage = convert(server.channel, options, {page(1, "GARBAGE1")});
+        require(garbage.status.ok() && garbage.raws.size() == 1,
+                "a malformed answer ends OK: " + garbage.status.error_message());
+        require(server.service->unavailable.load() == 1 && server.service->converted.load() == 2,
+                "those two count as converted streams");
+
+        // A refusal of every page (HTTP 400) is the endpoint not serving
+        // them either.
+        Collected refused = convert(server.channel, options, {page(1, "REFUSE1")});
+        require(refused.status.error_code() == grpc::StatusCode::UNAVAILABLE &&
+                    refused.status.error_message().contains("image too large"),
+                "a stream refused whole is UNAVAILABLE and says why: " +
+                    refused.status.error_message());
+        server.stop();
+    }
+    {
+        // Nothing listening at all.
+        vlm::Config config;
+        config.endpoint = "http://127.0.0.1:1";
+        TestServer server(config);
+        Collected out = convert(server.channel, options, {page(1, "PAGE1")});
+        require(out.status.error_code() == grpc::StatusCode::UNAVAILABLE,
+                "an unreachable endpoint is UNAVAILABLE");
+        require(out.raws.size() == 1 &&
+                    out.raws[0].error_code() == vlmv1::PAGE_ERROR_CODE_ENDPOINT_UNREACHABLE &&
+                    !out.raws[0].has_endpoint_error(),
+                "the page says the endpoint was unreachable");
+        require(out.got_complete && out.complete.pages_failed() == 1, "the trailer arrives");
+        server.stop();
+    }
+    {
+        // A model that never answers within the page budget.
+        vlm::Config config;
+        config.endpoint = fake->endpoint();
+        config.vlm_timeout_seconds = 1;
+        TestServer server(config);
+        fake->hold_released = false;
+        Collected out = convert(server.channel, options, {page(1, "HOLD1")});
+        fake->hold_released = true;
+        require(out.raws.size() == 1 &&
+                    out.raws[0].error_code() == vlmv1::PAGE_ERROR_CODE_TIMEOUT,
+                "a page past its budget timed out: " +
+                    (out.raws.empty() ? std::string("no PageRaw") : out.raws[0].error()));
+        require(out.status.error_code() == grpc::StatusCode::UNAVAILABLE,
+                "a stream that only timed out is UNAVAILABLE");
+        server.stop();
+    }
+}
+
 void verify_logprobs_off(FakeVlm* fake) {
     vlm::Config config;
     config.endpoint = fake->endpoint();
@@ -1302,7 +1483,10 @@ int main() {
         verify_alternatives(server.channel, &fake);
         verify_page_warnings(server.channel);
         verify_truncated_generation(server.channel);
+        verify_unreported_model_is_not_invented(server.channel);
         verify_unusable_layout_answers(server.channel);
+        verify_page_errors_are_typed(server.channel);
+        verify_endpoint_failure_is_not_success(&fake);
         verify_logprobs_off(&fake);
         verify_abort_on_error(server.channel);
         verify_error_matrix(server.channel);

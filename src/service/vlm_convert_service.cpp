@@ -9,6 +9,8 @@
 #include <limits>
 #include <mutex>
 #include <optional>
+#include <print>
+#include <string>
 #include <string_view>
 #include <thread>
 #include <tuple>
@@ -90,7 +92,36 @@ constexpr auto kCancelPollInterval = std::chrono::milliseconds(50);
 // before a page is paid for.
 constexpr uint32_t kMaxTopLogprobs = 20;
 
-// PNG signature: 8 bytes, 89 50 4E 47 0D 0A 1A 0A.
+// The typed reason a page failed for the way its VLM call failed.
+vlmv1::PageErrorCode page_error_code(VlmFailure failure) {
+    switch (failure) {
+        case VlmFailure::kUnreachable:
+            return vlmv1::PAGE_ERROR_CODE_ENDPOINT_UNREACHABLE;
+        case VlmFailure::kHttpStatus:
+            return vlmv1::PAGE_ERROR_CODE_ENDPOINT_HTTP_ERROR;
+        case VlmFailure::kTimeout:
+            return vlmv1::PAGE_ERROR_CODE_TIMEOUT;
+        case VlmFailure::kMalformedResponse:
+            return vlmv1::PAGE_ERROR_CODE_MALFORMED_RESPONSE;
+        // The endpoint is validated before a page is read, a cancelled
+        // call emits no event, and a call that answered did not fail: none
+        // of these reaches a PageRaw unless something in this server is
+        // wrong.
+        case VlmFailure::kInvalidEndpoint:
+        case VlmFailure::kCancelled:
+        case VlmFailure::kNone:
+            return vlmv1::PAGE_ERROR_CODE_INTERNAL;
+    }
+    return vlmv1::PAGE_ERROR_CODE_INTERNAL;
+}
+
+// True for the failures where the endpoint never answered the page.
+bool endpoint_failure(vlmv1::PageErrorCode code) {
+    return code == vlmv1::PAGE_ERROR_CODE_ENDPOINT_UNREACHABLE ||
+           code == vlmv1::PAGE_ERROR_CODE_ENDPOINT_HTTP_ERROR ||
+           code == vlmv1::PAGE_ERROR_CODE_TIMEOUT;
+}
+
 // True for the stop reasons that mean the model did not finish its answer:
 // cut at max_tokens, ended by the endpoint's content filter, or ended by an
 // inference error. An answer with any of these is a short page.
@@ -100,6 +131,7 @@ bool generation_cut_short(docv1::VlmStopReason reason) {
            reason == docv1::VLM_STOP_REASON_INFERENCE_ERROR;
 }
 
+// PNG signature: 8 bytes, 89 50 4E 47 0D 0A 1A 0A.
 bool is_png(const std::string& bytes) {
     static constexpr char kMagic[8] = {'\x89', 'P', 'N', 'G', '\x0d', '\x0a', '\x1a', '\x0a'};
     return bytes.starts_with(std::string_view(kMagic, sizeof(kMagic)));
@@ -266,6 +298,11 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
     std::atomic<uint32_t> started{0};
     std::atomic<uint32_t> ok{0};
     std::atomic<uint32_t> page_failed{0};
+    // The failed pages the endpoint never answered (unreachable, timed
+    // out, an HTTP error), and what the first of them reported.
+    std::mutex endpoint_failure_mutex;
+    uint32_t endpoint_failed = 0;
+    std::string first_endpoint_failure;
     // Pages whose answer the model did not finish, whether they then mapped
     // or not.
     std::atomic<uint32_t> page_truncated{0};
@@ -323,6 +360,7 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
             if (!size) {
                 auto* raw = event->mutable_page_raw();
                 raw->set_page_no(job.image.page_no());
+                raw->set_error_code(vlmv1::PAGE_ERROR_CODE_INVALID_PAGE);
                 raw->set_error("page has no width or height, and its PNG header does not "
                                "give one");
                 return true;
@@ -372,7 +410,12 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
         // token cost. Without the stop reason a page cut off at max_tokens
         // is indistinguishable from a page that simply ended there.
         page.has_generation = true;
-        page.generation.set_model(result.model.empty() ? job.model : result.model);
+        // `model` is the model that answered. An endpoint that does not
+        // say leaves it unset: the name asked for is already in the
+        // collector source, and repeating it here would record an answer
+        // under a model that may never have run (some servers answer with
+        // their one model whatever name the request carries).
+        page.generation.set_model(result.model);
         page.generation.set_endpoint(endpoint_origin(job.call.endpoint));
         if (!result.finish_reason.empty()) {
             page.generation.set_finish_reason(result.finish_reason);
@@ -407,7 +450,9 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
             // item: nothing in the response maps a token back to the item
             // it ended up in.
             page.has_alternatives = true;
-            page.alternatives.set_created_by(page.generation.model());
+            if (!result.model.empty()) {
+                page.alternatives.set_created_by(result.model);
+            }
             for (const TokenAlternative& alternate : result.alternatives) {
                 auto* hypothesis = page.alternatives.add_hypotheses();
                 hypothesis->set_text(alternate.token);
@@ -420,7 +465,18 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
         if (!result.ok) {
             auto* raw = event->mutable_page_raw();
             raw->set_page_no(page.page_no);
+            raw->set_error_code(page_error_code(result.failure));
             raw->set_error(result.error);
+            if (result.failure == VlmFailure::kHttpStatus) {
+                // What the endpoint said, kept as it said it: the status
+                // alone does not tell a refused page from a server out of
+                // memory.
+                auto* said = raw->mutable_endpoint_error();
+                said->set_http_status(static_cast<uint32_t>(result.http_status));
+                said->set_message(result.endpoint_message);
+                said->set_type(result.endpoint_type);
+                said->set_message_truncated(result.endpoint_message_truncated);
+            }
             return true;
         }
         std::string map_error;
@@ -462,6 +518,7 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
             auto* raw = event->mutable_page_raw();
             raw->set_page_no(page.page_no);
             raw->set_text(result.text);
+            raw->set_error_code(vlmv1::PAGE_ERROR_CODE_UNMAPPABLE_OUTPUT);
             raw->set_error(map_error);
             // An answer cut off at max_tokens is the usual reason it no
             // longer parses; the stop reason is what tells the caller so.
@@ -508,12 +565,26 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
                     event.Clear();
                     auto* raw = event.mutable_page_raw();
                     raw->set_page_no(job.image.page_no());
+                    raw->set_error_code(vlmv1::PAGE_ERROR_CODE_INTERNAL);
                     raw->set_error(std::string("internal error converting the page: ") +
                                    error.what());
                 }
                 const bool failed_page = event.has_page_raw();
                 if (failed_page) {
                     page_failed++;
+                    const vlmv1::PageRaw& raw = event.page_raw();
+                    if (endpoint_failure(raw.error_code())) {
+                        // One line per page the endpoint failed: the event
+                        // goes to the caller, and the operator of this
+                        // server needs the reason too.
+                        std::println(stderr,
+                                     "grpc-vlm-convert: page {} failed at the endpoint: {}",
+                                     raw.page_no(), raw.error());
+                        std::lock_guard<std::mutex> lock(endpoint_failure_mutex);
+                        if (endpoint_failed++ == 0) {
+                            first_endpoint_failure = raw.error();
+                        }
+                    }
                 } else {
                     ok++;
                 }
@@ -660,12 +731,26 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
     trailer->set_pages_ok(ok.load());
     trailer->set_pages_failed(page_failed.load());
     trailer->set_pages_truncated(page_truncated.load());
-    write(complete);
-
-    converted++;
     pages_ok += ok.load();
     pages_failed += page_failed.load();
     pages_truncated += page_truncated.load();
+    if (!write(complete)) {
+        // The consumer left before the trailer: nobody was told how the
+        // stream ended, so it is not a converted one.
+        return grpc::Status(grpc::StatusCode::CANCELLED, "client cancelled the stream");
+    }
+    // Every worker is joined, so the endpoint failure count is final.
+    if (ok.load() == 0 && page_failed.load() > 0 && endpoint_failed == page_failed.load()) {
+        // The endpoint served nothing. The page failures and the trailer
+        // are already out; an OK on top of them would count a dead
+        // endpoint as a conversion.
+        unavailable++;
+        return grpc::Status(grpc::StatusCode::UNAVAILABLE,
+                            "no page converted: all " + std::to_string(page_failed.load()) +
+                                " page(s) failed at the VLM endpoint (first: " +
+                                first_endpoint_failure + ")");
+    }
+    converted++;
     return grpc::Status::OK;
 }
 

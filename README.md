@@ -40,6 +40,15 @@ GRPC_VLM_TEST_PNG=/path/to/page.png \
   ./build/vlm-golden-test
 ```
 
+On a host that is meant to have a VLM server, set
+`GRPC_VLM_TEST_REQUIRE_ENDPOINT=1` as well: a missing endpoint or page
+raster is then a failure, not a skip, so a suite that ran no real model
+cannot come out green there. `GRPC_VLM_TEST_REQUIRE_DEVICE=cuda` (or
+`xpu`) also asks the endpoint's `GET /health` which device its model is on
+(the `north-micro-vision` server reports it) and fails unless it starts
+with that name; the llama.cpp server has no such route, so run
+`serving/llama-vlm-intel/check-gpu.sh` before the suite there.
+
 ## Run
 
 ```sh
@@ -65,6 +74,7 @@ Configuration is entirely `GRPC_VLM_*` environment variables:
 | `GRPC_VLM_MAX_BUFFERED_BYTES` | 16 × `GRPC_VLM_MAX_PAGE_BYTES` | The same bound across every stream on both transports. At least `GRPC_VLM_MAX_PAGE_BYTES` |
 | `GRPC_VLM_VLM_TIMEOUT_SECONDS` | `300` | Wall-clock budget for one page's whole VLM call: every attempt and every retry backoff spend from it, and an endpoint that drips bytes cannot stretch it. A cancelled stream or an expired client deadline ends the call sooner, mid-attempt included |
 | `GRPC_VLM_METRICS_INTERVAL_SECONDS` | `60` | Stdout metrics line interval, 0 disables |
+| `GRPC_VLM_HEALTH_PROBE_SECONDS` | `15` | Seconds between health probes of the configured endpoint (a `GET` of its `/v1/models`, with the API key when one is set). gRPC health and `/healthz` report not serving until a probe passes and whenever one fails: nothing answers, a 5xx (a model still loading), or 401/403. `0` turns the probe off; health then says only whether an endpoint is configured |
 | `GRPC_VLM_HTTP_PORT` | `50059` | HTTP/JSON front-end port; `0` or empty disables the listener |
 | `GRPC_VLM_HTTP_HOST` | `127.0.0.1` | Address the HTTP front end binds. Any non-loopback host (`0.0.0.0` in a container) requires `GRPC_VLM_HTTP_TOKEN`, or the server refuses to start |
 | `GRPC_VLM_HTTP_TOKEN` | *(empty)* | Bearer token every HTTP convert request must carry (`Authorization: Bearer <token>`); `/healthz` stays open. Wrong or missing is 401, checked before the body is read. Never logged |
@@ -75,10 +85,13 @@ Configuration is entirely `GRPC_VLM_*` environment variables:
 Alongside gRPC, the same binary serves an HTTP/JSON front end on
 `GRPC_VLM_HTTP_HOST`:`GRPC_VLM_HTTP_PORT`, loopback by default (any other
 host needs `GRPC_VLM_HTTP_TOKEN`, sent as `Authorization: Bearer
-<token>`). It drives the identical ConvertPages pipeline: the
-envelope is plain JSON, but every message body is canonical proto3 JSON
-(protobuf `MessageToJsonString` / `JsonStringToMessage`, camelCase field
-names, base64 bytes), never hand-mapped.
+<token>`). It drives the identical ConvertPages pipeline. Every body is a
+message of `proto/ai/pipestream/vlm/v1/vlm_convert_http.proto` in
+canonical proto3 JSON (camelCase field names, base64 bytes), parsed or
+printed whole by one protobuf call (`JsonStringToMessage` /
+`MessageToJsonString`): the request is a `ConvertHttpRequest`, the
+response a `ConvertHttpResponse`. No JSON is assembled or taken apart by
+hand, and a field the request message does not have is refused (400).
 
 `POST /v1/convert` runs a whole conversion and returns every stream event
 in order:
@@ -96,19 +109,21 @@ Errors keep the gRPC matrix: 400 on `INVALID_ARGUMENT` (bad JSON, page_no
 0, non-PNG bytes), 401 on a missing or wrong token, 403 on
 `PERMISSION_DENIED` (an endpoint override the server does not allow), 413
 on `RESOURCE_EXHAUSTED` or a body over `GRPC_VLM_HTTP_MAX_BODY_BYTES`, 501
-on `UNIMPLEMENTED`
-(PDF input), 500 otherwise. The body still carries the events collected
-before the failure plus an `error` object:
+on `UNIMPLEMENTED` (PDF input), 503 on `UNAVAILABLE` (no page converted
+and every page failed at the VLM endpoint), 500 otherwise. The body still
+carries the events collected before the failure plus an `error` object
+whose `code` is a `ConvertHttpErrorCode`:
 
 ```json
-{"events": [...], "error": {"code": "ABORTED", "message": "abort_on_error set and 1 page(s) failed"}}
+{"events": [...], "error": {"code": "CONVERT_HTTP_ERROR_CODE_ABORTED", "message": "abort_on_error set and 1 page(s) failed"}}
 ```
 
 `POST /v1/convert/stream` takes the same request body and answers with
 chunked NDJSON: one `ConvertPagesResponse` as proto3 JSON per line,
 flushed the moment the pipeline produces it, so HTTP callers see the same
 live per-page events gRPC clients get, in completion order. A mid-stream
-failure ends the body with one `{"error": ...}` line:
+failure ends the body with one `{"error": ...}` line (a
+`ConvertHttpResponse` carrying only the error):
 
 ```sh
 curl -sN http://localhost:50059/v1/convert/stream -d '{"options": {}, "pages": [...]}'
@@ -120,7 +135,8 @@ curl -sN http://localhost:50059/v1/convert/stream -d '{"options": {}, "pages": [
 A caller that hangs up stops its conversion on either route: queued pages
 are skipped and the VLM call in flight is cut, so nothing more is paid for.
 
-`GET /healthz` returns `200 ok`.
+`GET /healthz` returns `200 ok` while the VLM endpoint serves and
+`503 not serving: <reason>` while it does not.
 
 ## gRPC stream
 
@@ -128,13 +144,22 @@ Clients stream `ConvertPagesRequest` (one `ConvertOptions`, then one
 `PageImage` PNG per page) and receive `PageStarted` / `PageDocument` /
 `PageRaw` events per page in completion order: a page is emitted the
 moment its VLM call returns, out-of-order pages are legal and key on
-`page_no`. A `PageDocument` lists anything cut to a server cap as typed
+`page_no`. A `PageRaw` says why its page failed as a `PageErrorCode`
+(endpoint unreachable, endpoint HTTP error, timeout, malformed response,
+unmappable output, invalid page, internal), and for an HTTP error carries
+the status and what the endpoint said in `endpoint_error`. A stream on
+which no page converted and every page failed at the endpoint ends
+`UNAVAILABLE` after its events and its trailer. A `PageDocument` lists anything cut to a server cap as typed
 `PageWarning`s beside its fragment (a table past the row, column or cell
 caps, ...), and an answer the model did not finish (cut off at
 `max_tokens`) as `PAGE_WARNING_CODE_GENERATION_TRUNCATED`. A
 `ConvertComplete` trailer closes the stream and counts such pages in
 `pages_truncated`. Health
-(`grpc.health.v1.Health`) and server reflection are registered.
+(`grpc.health.v1.Health`) and server reflection are registered. Health
+follows the VLM endpoint, not the process: it is `NOT_SERVING` with no
+endpoint a stream could use (`GRPC_VLM_ENDPOINT` empty and overrides off),
+until the endpoint's model list first answers, and whenever it stops
+answering (`GRPC_VLM_HEALTH_PROBE_SECONDS`); each change is logged.
 `GetServiceInfo` also carries a `UiInfo` block (title, path,
 description) advertising this service's tab to the shared demo shell.
 

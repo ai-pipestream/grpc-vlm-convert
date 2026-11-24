@@ -37,7 +37,11 @@ service VlmConvertService {
   // is PERMISSION_DENIED; pages above the byte or page-count cap are
   // RESOURCE_EXHAUSTED; malformed input (missing options, non-PNG page
   // bytes, a page_no of zero or above 2147483647) is INVALID_ARGUMENT;
-  // PDF input without a rasterizer built in is UNIMPLEMENTED.
+  // PDF input without a rasterizer built in is UNIMPLEMENTED. A stream
+  // where no page converted and every page failed at the endpoint (it
+  // could not be reached, it timed out, or it answered with an HTTP
+  // error) ends UNAVAILABLE after its PageRaw events and its trailer:
+  // nothing was converted, and the status must not say otherwise.
   rpc ConvertPages(stream ConvertPagesRequest) returns (stream ConvertPagesResponse);
 
   // Reports the server build, the configured endpoint's scheme, host and
@@ -391,14 +395,67 @@ message PageRaw {
   // The model's raw response text, when the call succeeded but mapping
   // failed. Empty on endpoint failure.
   string text = 2;
-  // What went wrong, when this event reports a failure (endpoint error,
-  // or the mapping failure reason alongside text). Empty when unset.
+  // What went wrong, in words: the endpoint failure, or the mapping
+  // failure reason alongside text. For people and logs; error_code is the
+  // value to branch on.
   string error = 3;
   // The model call behind text, when the call succeeded but mapping failed:
   // a stop reason of VLM_STOP_REASON_LENGTH says the answer was cut off,
   // which is the usual reason it no longer parses. Unset on endpoint
   // failure.
   ai.pipestream.document.v1.GenerationSource generation = 4;
+  // Why the page failed, as a value a caller can branch on; error says the
+  // same in words. Set on every PageRaw.
+  PageErrorCode error_code = 5;
+  // What the endpoint answered, when error_code is
+  // PAGE_ERROR_CODE_ENDPOINT_HTTP_ERROR. Unset otherwise.
+  EndpointError endpoint_error = 6;
+}
+
+// Why a page produced a PageRaw instead of a PageDocument.
+enum PageErrorCode {
+  // Not set. Never emitted by the server.
+  PAGE_ERROR_CODE_UNSPECIFIED = 0;
+  // No connection to the VLM endpoint could be made or kept, after the
+  // retries the client makes.
+  PAGE_ERROR_CODE_ENDPOINT_UNREACHABLE = 1;
+  // The endpoint answered with an HTTP status other than 200, after the
+  // retries the client makes for 429 and 5xx. endpoint_error carries the
+  // status and what the endpoint said.
+  PAGE_ERROR_CODE_ENDPOINT_HTTP_ERROR = 2;
+  // The call did not finish within the server's per-page time budget,
+  // retries included.
+  PAGE_ERROR_CODE_TIMEOUT = 3;
+  // The endpoint answered 200 with a body that is not a chat completion
+  // carrying message content.
+  PAGE_ERROR_CODE_MALFORMED_RESPONSE = 4;
+  // The model answered, but not in the response format asked for, so
+  // nothing could be mapped. text holds the answer verbatim.
+  PAGE_ERROR_CODE_UNMAPPABLE_OUTPUT = 5;
+  // The page as sent cannot be converted: it names no width or height and
+  // its PNG header gives none.
+  PAGE_ERROR_CODE_INVALID_PAGE = 6;
+  // The server failed while converting the page, through no fault of the
+  // page or the endpoint.
+  PAGE_ERROR_CODE_INTERNAL = 7;
+}
+
+// The endpoint's own account of a call it refused or failed.
+message EndpointError {
+  // The HTTP status of the reply (the last one, when the call was
+  // retried).
+  uint32 http_status = 1;
+  // The reply's error message: the OpenAI error object's message
+  // ("error.message"), or the text other servers put in its place (an
+  // "error" or "detail" string, a top-level "message", a plain-text body).
+  // Empty when the reply carried none that could be read. At most 2048
+  // bytes; message_truncated says when it was cut.
+  string message = 2;
+  // The reply's error type ("error.type", e.g. "invalid_request_error"),
+  // at most 128 bytes. Empty when the reply named none.
+  string type = 3;
+  // True when the endpoint's message was longer than message holds.
+  bool message_truncated = 4;
 }
 
 // Trailer summarizing the finished conversion.
