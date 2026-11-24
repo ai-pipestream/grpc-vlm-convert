@@ -36,6 +36,123 @@ bool retryable_transport(httplib::Error error) {
     return error == httplib::Error::Connection || error == httplib::Error::ConnectionTimeout;
 }
 
+// An error reply past this size is not parsed: the reason a call failed
+// is in the first lines of a body, and an error page can be megabytes.
+constexpr size_t kMaxErrorBodyBytes = 64 * 1024;
+
+// True when the whole of `text` is well-formed UTF-8 (no overlong forms,
+// no surrogates, nothing past U+10FFFF): what a proto string may hold.
+bool valid_utf8(std::string_view text) {
+    size_t i = 0;
+    while (i < text.size()) {
+        const auto lead = static_cast<unsigned char>(text[i]);
+        size_t length = 0;
+        unsigned minimum = 0, value = 0;
+        if (lead < 0x80) {
+            i++;
+            continue;
+        } else if ((lead & 0xE0) == 0xC0) {
+            length = 2, minimum = 0x80, value = lead & 0x1F;
+        } else if ((lead & 0xF0) == 0xE0) {
+            length = 3, minimum = 0x800, value = lead & 0x0F;
+        } else if ((lead & 0xF8) == 0xF0) {
+            length = 4, minimum = 0x10000, value = lead & 0x07;
+        } else {
+            return false;
+        }
+        if (i + length > text.size()) {
+            return false;
+        }
+        for (size_t k = 1; k < length; k++) {
+            const auto next = static_cast<unsigned char>(text[i + k]);
+            if ((next & 0xC0) != 0x80) {
+                return false;
+            }
+            value = (value << 6) | (next & 0x3F);
+        }
+        if (value < minimum || value > 0x10FFFF || (value >= 0xD800 && value <= 0xDFFF)) {
+            return false;
+        }
+        i += length;
+    }
+    return true;
+}
+
+// The leading part of valid UTF-8 `text` that fits `limit` bytes, cut
+// between characters. `cut` is set when something was left off.
+std::string bounded(std::string_view text, size_t limit, bool* cut = nullptr) {
+    if (text.size() <= limit) {
+        return std::string(text);
+    }
+    size_t end = limit;
+    // Back off a continuation byte: the character it belongs to would be
+    // split.
+    while (end > 0 && (static_cast<unsigned char>(text[end]) & 0xC0) == 0x80) {
+        end--;
+    }
+    if (cut != nullptr) {
+        *cut = true;
+    }
+    return std::string(text.substr(0, end));
+}
+
+std::string_view trimmed(std::string_view text) {
+    constexpr std::string_view kSpace = " \t\r\n";
+    const size_t first = text.find_first_not_of(kSpace);
+    if (first == std::string_view::npos) {
+        return {};
+    }
+    return text.substr(first, text.find_last_not_of(kSpace) - first + 1);
+}
+
+// Reads what an endpoint said in a reply that is not a 200 into the
+// result's endpoint_message and endpoint_type. The shapes, in the order
+// tried: the OpenAI error object ({"error": {"message", "type"}}, also
+// llama.cpp's and current vLLM's); a bare string under "error"; vLLM's
+// older top-level {"message", "type"}; FastAPI's {"detail": "..."}; and a
+// plain-text body. Anything else (markup, a body past the size cap, bytes
+// that are not text) leaves both empty: the status is still reported, and
+// nothing is guessed.
+void read_error_reply(const httplib::Response& response, VlmResult* result) {
+    const std::string& body = response.body;
+    if (body.empty() || body.size() > kMaxErrorBodyBytes) {
+        return;
+    }
+    std::string_view message, type;
+    std::string held_message, held_type;
+    const std::string content_type = response.get_header_value("Content-Type");
+    const nlohmann::json parsed = nlohmann::json::parse(body, nullptr, false);
+    auto text_at = [](const nlohmann::json& object, const char* key, std::string* into) {
+        const auto entry = object.find(key);
+        if (entry == object.end() || !entry->is_string()) {
+            return false;
+        }
+        *into = entry->get<std::string>();
+        return true;
+    };
+    if (parsed.is_object()) {
+        const auto error = parsed.find("error");
+        if (error != parsed.end() && error->is_object()) {
+            text_at(*error, "message", &held_message);
+            text_at(*error, "type", &held_type);
+        } else if (error != parsed.end() && error->is_string()) {
+            held_message = error->get<std::string>();
+        } else if (text_at(parsed, "message", &held_message)) {
+            text_at(parsed, "type", &held_type);
+        } else {
+            text_at(parsed, "detail", &held_message);
+        }
+        message = held_message;
+        type = held_type;
+    } else if (parsed.is_discarded() && content_type.starts_with("text/plain") &&
+               valid_utf8(body)) {
+        message = body;
+    }
+    result->endpoint_message =
+        bounded(trimmed(message), kMaxEndpointMessageBytes, &result->endpoint_message_truncated);
+    result->endpoint_type = bounded(trimmed(type), kMaxEndpointTypeBytes);
+}
+
 // How often the watchdog asks the caller's probe whether it still wants
 // the answer, and how often it re-stops an attempt after the call trips.
 constexpr auto kWatchInterval = std::chrono::milliseconds(50);
@@ -337,6 +454,7 @@ VlmResult generate(const VlmCall& call) {
     VlmResult result;
     ParsedEndpoint where;
     if (std::string problem = parse_endpoint(call.endpoint, &where); !problem.empty()) {
+        result.failure = VlmFailure::kInvalidEndpoint;
         result.error = std::move(problem);
         return result;
     }
@@ -344,6 +462,7 @@ VlmResult generate(const VlmCall& call) {
     // A caller that already left gets nothing sent on its behalf.
     if (call.cancelled && call.cancelled()) {
         result.cancelled = true;
+        result.failure = VlmFailure::kCancelled;
         result.error = "VLM call cancelled before it started";
         return result;
     }
@@ -416,6 +535,7 @@ VlmResult generate(const VlmCall& call) {
                 // parse_endpoint refuses what httplib cannot take apart, so
                 // this is a backstop: a client that did not construct must
                 // never be used (its calls dereference null).
+                result.failure = VlmFailure::kInvalidEndpoint;
                 result.error = "endpoint is not usable: " + where.origin;
                 return result;
             }
@@ -463,8 +583,10 @@ VlmResult generate(const VlmCall& call) {
     if (!(response && response->status == 200) && guard.tripped()) {
         if (guard.by_caller()) {
             result.cancelled = true;
+            result.failure = VlmFailure::kCancelled;
             result.error = "VLM call cancelled";
         } else {
+            result.failure = VlmFailure::kTimeout;
             result.error = "VLM call exceeded its " + std::to_string(call.timeout_seconds) +
                            " s budget";
             if (retries > 0) {
@@ -474,16 +596,30 @@ VlmResult generate(const VlmCall& call) {
         return result;
     }
     if (!response) {
+        result.failure = VlmFailure::kUnreachable;
         result.error = "endpoint unreachable: " + where.origin;
         return result;
     }
     if (response->status != 200) {
+        // What the endpoint said is the only thing that tells a page it
+        // refused ("image too large") from a server out of memory.
+        result.failure = VlmFailure::kHttpStatus;
+        result.http_status = response->status;
+        read_error_reply(*response, &result);
         result.error = "endpoint returned HTTP " + std::to_string(response->status);
         if (retries > 0) {
             result.error += " after " + std::to_string(retries + 1) + " attempts";
         }
+        if (!result.endpoint_message.empty()) {
+            result.error += ": " + result.endpoint_message;
+            if (result.endpoint_message_truncated) {
+                result.error += " [cut]";
+            }
+        }
         return result;
     }
+    // Every return below is a 200 that could not be read.
+    result.failure = VlmFailure::kMalformedResponse;
 
     const nlohmann::json parsed = nlohmann::json::parse(response->body, nullptr, false);
     if (parsed.is_discarded()) {
@@ -598,6 +734,7 @@ VlmResult generate(const VlmCall& call) {
         }
     }
     result.ok = true;
+    result.failure = VlmFailure::kNone;
     return result;
 }
 

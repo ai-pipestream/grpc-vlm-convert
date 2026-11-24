@@ -6,8 +6,8 @@
 #include <vector>
 
 #include <google/protobuf/util/json_util.h>
-#include <nlohmann/json.hpp>
 
+#include "ai/pipestream/vlm/v1/vlm_convert_http.pb.h"
 #include "service/vlm_convert_service.h"
 
 namespace vlm {
@@ -16,32 +16,35 @@ namespace {
 
 namespace vlmv1 = ai::pipestream::vlm::v1;
 
-// The gRPC status vocabulary, surfaced as strings in the JSON error body.
-const char* status_code_name(grpc::StatusCode code) {
+// A gRPC status code as the error body names it.
+vlmv1::ConvertHttpErrorCode error_code_for(grpc::StatusCode code) {
     switch (code) {
         case grpc::StatusCode::INVALID_ARGUMENT:
-            return "INVALID_ARGUMENT";
+            return vlmv1::CONVERT_HTTP_ERROR_CODE_INVALID_ARGUMENT;
         case grpc::StatusCode::FAILED_PRECONDITION:
-            return "FAILED_PRECONDITION";
+            return vlmv1::CONVERT_HTTP_ERROR_CODE_FAILED_PRECONDITION;
         case grpc::StatusCode::PERMISSION_DENIED:
-            return "PERMISSION_DENIED";
+            return vlmv1::CONVERT_HTTP_ERROR_CODE_PERMISSION_DENIED;
         case grpc::StatusCode::UNAUTHENTICATED:
-            return "UNAUTHENTICATED";
+            return vlmv1::CONVERT_HTTP_ERROR_CODE_UNAUTHENTICATED;
         case grpc::StatusCode::RESOURCE_EXHAUSTED:
-            return "RESOURCE_EXHAUSTED";
+            return vlmv1::CONVERT_HTTP_ERROR_CODE_RESOURCE_EXHAUSTED;
         case grpc::StatusCode::UNIMPLEMENTED:
-            return "UNIMPLEMENTED";
+            return vlmv1::CONVERT_HTTP_ERROR_CODE_UNIMPLEMENTED;
         case grpc::StatusCode::ABORTED:
-            return "ABORTED";
+            return vlmv1::CONVERT_HTTP_ERROR_CODE_ABORTED;
         case grpc::StatusCode::CANCELLED:
-            return "CANCELLED";
+            return vlmv1::CONVERT_HTTP_ERROR_CODE_CANCELLED;
+        case grpc::StatusCode::UNAVAILABLE:
+            return vlmv1::CONVERT_HTTP_ERROR_CODE_UNAVAILABLE;
         default:
-            return "INTERNAL";
+            return vlmv1::CONVERT_HTTP_ERROR_CODE_INTERNAL;
     }
 }
 
 // The ConvertPages error matrix, mapped onto HTTP: the request-shape
-// errors are 4xx, everything server-side collapses to 500.
+// errors are 4xx, an endpoint that served nothing is 503, everything else
+// server-side collapses to 500.
 int http_status_for(grpc::StatusCode code) {
     switch (code) {
         case grpc::StatusCode::INVALID_ARGUMENT:
@@ -54,14 +57,17 @@ int http_status_for(grpc::StatusCode code) {
             return 413;
         case grpc::StatusCode::UNIMPLEMENTED:
             return 501;
+        case grpc::StatusCode::UNAVAILABLE:
+            return 503;
         default:
             return 500;
     }
 }
 
-std::string error_json(grpc::StatusCode code, const std::string& message) {
-    nlohmann::json error = {{"code", status_code_name(code)}, {"message", message}};
-    return error.dump();
+void set_error(vlmv1::ConvertHttpResponse* body, grpc::StatusCode code,
+               const std::string& message) {
+    body->mutable_error()->set_code(error_code_for(code));
+    body->mutable_error()->set_message(message);
 }
 
 // "Authorization: Bearer <token>" carrying the operator's token, compared
@@ -73,45 +79,29 @@ bool bearer_matches(const httplib::Request& request, const Secret& token) {
            token.matches(std::string_view(header).substr(kScheme.size()));
 }
 
-// Envelope → the exact request sequence a gRPC client would stream:
+// Request body → the exact request sequence a gRPC client would stream:
 // options first (an empty-payload message when absent, so the pipeline's
 // own "first message must be ConvertOptions" fires), then one PageImage
-// per array element. Message parsing is protobuf's canonical proto3 JSON.
+// per page. The body is one ConvertHttpRequest in protobuf's canonical
+// proto3 JSON, parsed by protobuf in one pass; its pages are moved, not
+// copied, into the sequence.
 bool parse_convert_body(const std::string& body,
                         std::vector<vlmv1::ConvertPagesRequest>* requests, std::string* error) {
-    const nlohmann::json envelope = nlohmann::json::parse(body, nullptr, false);
-    if (envelope.is_discarded() || !envelope.is_object()) {
-        *error = "request body must be a JSON object";
+    vlmv1::ConvertHttpRequest envelope;
+    const auto status = google::protobuf::util::JsonStringToMessage(body, &envelope);
+    if (!status.ok()) {
+        *error = "request body is not a convert request: " + std::string(status.message());
         return false;
     }
     vlmv1::ConvertPagesRequest first;
-    if (envelope.contains("options")) {
-        const auto status =
-            google::protobuf::util::JsonStringToMessage(envelope["options"].dump(),
-                                                        first.mutable_options());
-        if (!status.ok()) {
-            *error = "options: " + std::string(status.message());
-            return false;
-        }
+    if (envelope.has_options()) {
+        *first.mutable_options() = std::move(*envelope.mutable_options());
     }
     requests->push_back(std::move(first));
-    if (envelope.contains("pages")) {
-        if (!envelope["pages"].is_array()) {
-            *error = "pages must be an array";
-            return false;
-        }
-        size_t index = 0;
-        for (const nlohmann::json& element : envelope["pages"]) {
-            vlmv1::ConvertPagesRequest next;
-            const auto status = google::protobuf::util::JsonStringToMessage(
-                element.dump(), next.mutable_page_image());
-            if (!status.ok()) {
-                *error = "pages[" + std::to_string(index) + "]: " + std::string(status.message());
-                return false;
-            }
-            requests->push_back(std::move(next));
-            index++;
-        }
+    for (vlmv1::PageImage& image : *envelope.mutable_pages()) {
+        vlmv1::ConvertPagesRequest next;
+        *next.mutable_page_image() = std::move(image);
+        requests->push_back(std::move(next));
     }
     return true;
 }
@@ -153,16 +143,13 @@ HttpGateway::HttpGateway(const Config& config, VlmConvertServiceImpl& service)
             if (request.path == "/healthz" || bearer_matches(request, config_.http_token)) {
                 return httplib::Server::HandlerResponse::Unhandled;
             }
-            const std::string error =
-                error_json(grpc::StatusCode::UNAUTHENTICATED,
-                           "missing or wrong bearer token (Authorization: Bearer <token>)");
             response.status = 401;
             response.set_header("WWW-Authenticate", "Bearer");
             response.set_header("Connection", "close");
-            response.set_content(request.path == "/v1/convert"
-                                     ? "{\"events\":[],\"error\":" + error + "}"
-                                     : "{\"error\":" + error + "}",
-                                 "application/json");
+            response.set_content(
+                error_json(grpc::StatusCode::UNAUTHENTICATED,
+                           "missing or wrong bearer token (Authorization: Bearer <token>)"),
+                "application/json");
             return httplib::Server::HandlerResponse::Handled;
         });
     }
@@ -213,54 +200,73 @@ void HttpGateway::stop() {
     }
 }
 
+std::string HttpGateway::error_json(grpc::StatusCode code, const std::string& message) const {
+    vlmv1::ConvertHttpResponse body;
+    set_error(&body, code, message);
+    std::string json;
+    if (print_json(body, &json)) {
+        return json;
+    }
+    // Only the message can stand in the way (bytes that are not text), so
+    // the code goes out without it. Should even that fail the body is
+    // empty and the HTTP status speaks alone.
+    set_error(&body, code, "the error message could not be printed");
+    if (print_json(body, &json)) {
+        return json;
+    }
+    return {};
+}
+
+bool HttpGateway::print_json(const google::protobuf::Message& message, std::string* json) const {
+    json->clear();
+    if (printer_) {
+        return printer_(message, json);
+    }
+    return google::protobuf::util::MessageToJsonString(message, json).ok();
+}
+
 void HttpGateway::handle_convert(const httplib::Request& request,
                                  httplib::Response& response) {
     std::vector<vlmv1::ConvertPagesRequest> requests;
     std::string error;
     if (!parse_convert_body(request.body, &requests, &error)) {
         response.status = 400;
-        response.set_content("{\"events\":[],\"error\":" +
-                                 error_json(grpc::StatusCode::INVALID_ARGUMENT, error) + "}",
+        response.set_content(error_json(grpc::StatusCode::INVALID_ARGUMENT, error),
                              "application/json");
         return;
     }
+    vlmv1::ConvertHttpResponse body;
 
-    std::vector<std::string> events;
-    bool serialize_failed = false;
+    // The events are kept as the messages they are and printed once, with
+    // the body they belong to.
     auto write = [&](const vlmv1::ConvertPagesResponse& event) {
-        std::string json;
-        if (!google::protobuf::util::MessageToJsonString(event, &json).ok()) {
-            serialize_failed = true;
-            return false;
-        }
-        events.push_back(std::move(json));
+        *body.add_events() = event;
         return true;
     };
     // A caller that hangs up before its answer is ready stops the
     // pipeline: queued pages are skipped and calls in flight are cut,
     // rather than every page being sent to the VLM and paid for.
-    grpc::Status status = run_pipeline(service_, &requests, write, request.is_connection_closed);
-    if (serialize_failed && status.ok()) {
-        status = grpc::Status(grpc::StatusCode::INTERNAL, "event JSON serialization failed");
-    }
-
-    std::string body = "{\"events\":[";
-    for (size_t i = 0; i < events.size(); i++) {
-        if (i > 0) {
-            body += ',';
-        }
-        body += events[i];
-    }
-    body += ']';
+    const grpc::Status status =
+        run_pipeline(service_, &requests, write, request.is_connection_closed);
     if (!status.ok()) {
         // abort_on_error lands here too: the events collected so far ride
         // along with the error, as the gRPC stream would have delivered
         // them before its ABORTED trailer.
-        body += ",\"error\":" + error_json(status.error_code(), status.error_message());
+        set_error(&body, status.error_code(), status.error_message());
     }
-    body += '}';
+    std::string json;
+    if (!print_json(body, &json)) {
+        // A body protobuf cannot print is this server's failure, whatever
+        // the conversion's own status was. The events are what could not
+        // be printed, so the error goes out without them.
+        response.status = 500;
+        response.set_content(
+            error_json(grpc::StatusCode::INTERNAL, "response JSON serialization failed"),
+            "application/json");
+        return;
+    }
     response.status = status.ok() ? 200 : http_status_for(status.error_code());
-    response.set_content(body, "application/json");
+    response.set_content(json, "application/json");
 }
 
 void HttpGateway::handle_convert_stream(const httplib::Request& request,
@@ -269,8 +275,7 @@ void HttpGateway::handle_convert_stream(const httplib::Request& request,
     std::string error;
     if (!parse_convert_body(request.body, requests.get(), &error)) {
         response.status = 400;
-        response.set_content("{\"error\":" +
-                                 error_json(grpc::StatusCode::INVALID_ARGUMENT, error) + "}",
+        response.set_content(error_json(grpc::StatusCode::INVALID_ARGUMENT, error),
                              "application/json");
         return;
     }
@@ -285,17 +290,26 @@ void HttpGateway::handle_convert_stream(const httplib::Request& request,
             auto write_line = [&sink](const std::string& json) {
                 return sink.write(json.data(), json.size()) && sink.write("\n", 1);
             };
+            // An event that cannot be printed stops the pipeline like a
+            // caller that left, but it is not one: the stream then ends
+            // with an INTERNAL error line, not as a cancellation.
+            bool print_failed = false;
             auto write = [&](const vlmv1::ConvertPagesResponse& event) {
                 std::string json;
-                return google::protobuf::util::MessageToJsonString(event, &json).ok() &&
-                       write_line(json);
+                if (!print_json(event, &json)) {
+                    print_failed = true;
+                    return false;
+                }
+                return write_line(json);
             };
-            const grpc::Status status =
-                run_pipeline(service_, requests.get(), write,
-                             [&sink] { return !sink.is_writable(); });
+            grpc::Status status = run_pipeline(service_, requests.get(), write,
+                                               [&sink] { return !sink.is_writable(); });
+            if (print_failed) {
+                status = grpc::Status(grpc::StatusCode::INTERNAL,
+                                      "event JSON serialization failed");
+            }
             if (!status.ok()) {
-                write_line("{\"error\":" +
-                           error_json(status.error_code(), status.error_message()) + "}");
+                write_line(error_json(status.error_code(), status.error_message()));
             }
             sink.done();
             return false;

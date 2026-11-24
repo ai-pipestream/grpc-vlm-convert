@@ -55,6 +55,9 @@ class VlmConvertServiceImpl final
     std::atomic<long> converted{0};
     std::atomic<long> rejected{0};
     std::atomic<long> failed{0};
+    // Streams that ended UNAVAILABLE: no page converted, and every page
+    // failed at the VLM endpoint. Counted here and nowhere else.
+    std::atomic<long> unavailable{0};
     std::atomic<long> pages_ok{0};
     std::atomic<long> pages_failed{0};
     // Pages whose model answer ended early (max_tokens, content filter,

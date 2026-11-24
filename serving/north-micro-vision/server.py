@@ -23,6 +23,7 @@ import base64
 import binascii
 import hmac
 import io
+import json
 import logging
 import os
 import threading
@@ -279,7 +280,9 @@ class Guard:
     @staticmethod
     async def refuse(send: Any, status: int, detail: str,
                      extra: list[tuple[bytes, bytes]] | None = None) -> None:
-        body = ('{"detail": "' + detail + '"}').encode()
+        # json.dumps, never string gluing: a quote in the reason must not
+        # produce a body the client cannot parse.
+        body = json.dumps({"detail": detail}).encode()
         await send({
             "type": "http.response.start",
             "status": status,
