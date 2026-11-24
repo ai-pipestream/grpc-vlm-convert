@@ -340,12 +340,14 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
         job.call.cancelled = halted;
         VlmResult result;
         std::string shortfall;
+        std::vector<vlmv1::PageWarning> pass_warnings;
         if (job.nemotron) {
             NemotronPassResult passed = run_nemotron_passes(
                 job.call, *job.nemotron,
                 [&](const std::vector<VlmCall>& calls) { return run_within_slots(calls, vlm_slots_); });
             result = std::move(passed.result);
             shortfall = std::move(passed.shortfall);
+            pass_warnings = std::move(passed.warnings);
         } else {
             result = generate(job.call);
         }
@@ -423,7 +425,7 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
         }
         std::string map_error;
         docv1::Document fragment;
-        std::vector<vlmv1::PageWarning> warnings;
+        std::vector<vlmv1::PageWarning> warnings = std::move(pass_warnings);
         if (mapping::map_response(job.format, result.text, page, &fragment, &map_error,
                                   &warnings)) {
             auto* document = event->mutable_page_document();

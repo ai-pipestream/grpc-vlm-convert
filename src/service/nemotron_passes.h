@@ -56,6 +56,12 @@ struct NemotronPassResult {
     // crop the structure check refused is not a shortfall: keeping the
     // page block is the check doing its job.
     std::string shortfall;
+    // What the merge dropped. The merged text is rebuilt from the page
+    // call's well-formed blocks, so anything that call wrote outside them
+    // (a block without corners, an unfinished last block) never reaches the
+    // mapper; it is reported here instead. Empty when the page text went
+    // through unchanged, since the mapper then reports it itself.
+    std::vector<ai::pipestream::vlm::v1::PageWarning> warnings;
 };
 
 // `page` is the call a single pass would make; the stages reuse its

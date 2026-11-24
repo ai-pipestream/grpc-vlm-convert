@@ -57,19 +57,20 @@ void add_usage(VlmResult* total, const VlmResult& part) {
     }
 }
 
-NemotronPassResult finished(VlmResult result, std::string shortfall = {}) {
+NemotronPassResult finished(VlmResult result, std::string shortfall = {},
+                            std::vector<vlmv1::PageWarning> warnings = {}) {
     result.has_logprobs = false;
     result.mean_logprob = 0.0;
     result.scored_tokens = 0;
     result.alternatives.clear();
-    return {std::move(result), std::move(shortfall)};
+    return {std::move(result), std::move(shortfall), std::move(warnings)};
 }
 
 NemotronPassResult cancelled() {
     VlmResult result;
     result.cancelled = true;
     result.error = "VLM call cancelled";
-    return {std::move(result), {}};
+    return {std::move(result), {}, {}};
 }
 
 }  // namespace
@@ -173,9 +174,10 @@ NemotronPassResult run_nemotron_passes(const VlmCall& page, const NemotronPasses
         return finished(std::move(result),
                         "the page raster could not be decoded; no region was cropped");
     }
+    size_t over_cap = 0;
     const std::vector<mapping::NemotronCrop> crops = mapping::plan_nemotron_crops(
         raster.width(), raster.height(), result.text, detection ? &*detection : nullptr,
-        passes.union_regions);
+        passes.union_regions, &over_cap);
 
     std::vector<mapping::NemotronBlock> candidates;
     size_t failed = 0;
@@ -220,13 +222,31 @@ NemotronPassResult run_nemotron_passes(const VlmCall& page, const NemotronPasses
             }
         }
     }
-    result.text = mapping::merge_nemotron_crops(result.text, candidates);
+    std::string merged = mapping::merge_nemotron_crops(result.text, candidates);
+    // A merge rebuilds the text from the page call's well-formed blocks.
+    // What that call wrote outside them would be gone before the mapper
+    // could report it, so it is reported here.
+    std::vector<vlmv1::PageWarning> warnings;
+    if (merged != result.text) {
+        mapping::NemotronUnread unread;
+        mapping::nemotron_v35_blocks(result.text, &unread);
+        mapping::report_nemotron_unread(unread, &warnings);
+    }
+    result.text = std::move(merged);
     std::string shortfall;
     if (failed > 0) {
         shortfall = std::to_string(failed) + " of " + std::to_string(crops.size()) +
                     " region crops failed; those regions keep the page pass text";
     }
-    return finished(std::move(result), std::move(shortfall));
+    if (over_cap > 0) {
+        if (!shortfall.empty()) {
+            shortfall += "; ";
+        }
+        shortfall += std::to_string(over_cap) + " region(s) above the " +
+                     std::to_string(mapping::kMaxNemotronCrops) +
+                     " crop cap were not cropped and keep the page pass text";
+    }
+    return finished(std::move(result), std::move(shortfall), std::move(warnings));
 }
 
 std::vector<VlmResult> run_within_slots(const std::vector<VlmCall>& calls, Budget& slots) {

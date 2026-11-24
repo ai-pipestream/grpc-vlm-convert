@@ -235,6 +235,32 @@ on `PageDocument.warnings` (`PAGE_WARNING_CODE_TABLE_TRUNCATED` /
 `PAGE_WARNING_CODE_TABLE_GRID_OMITTED`, the item's ref, and a message with
 the numbers), so a cut table never passes for a complete one.
 
+The same goes for what a mapper reads past. Model output is not always
+well formed, and each mapper keeps what parses; what it could not use is
+reported, never dropped in silence:
+
+- `PAGE_WARNING_CODE_OUTPUT_TRUNCATED`: the answer breaks off inside its
+  own layout (a dots.ocr array with no closing bracket after an unfinished
+  element, a Nemotron Parse region or block that opens and never closes).
+  The complete elements are mapped; the message gives the size of the
+  tail that was not.
+- `PAGE_WARNING_CODE_ELEMENTS_SKIPPED`: entries nothing was built from (a
+  dots.ocr array entry that is not an object or has neither a usable
+  bbox nor text, a Nemotron Parse 3.5 block with text and fewer than two
+  corner tokens, a DocTags `<link_>` token that names no cell), counted.
+- `PAGE_WARNING_CODE_LOCATION_UNREADABLE`: an item kept with its text on
+  the full-page box because its location did not parse (a dots.ocr
+  element whose bbox is missing or is not four numbers, a DocTags
+  `<loc_>` token that is not a number), counted. Docling skips such a
+  dots.ocr element; this server keeps its words.
+
+A Nemotron Parse double or triple pass crops at most 80 regions; a page
+with more reports the rest under
+`PAGE_WARNING_CODE_NEMOTRON_PASS_INCOMPLETE`. When a pass merges crops
+into the page text, the text is rebuilt from the page call's well-formed
+blocks, so the pass reports what that call wrote outside them before the
+mapper sees the rebuilt text.
+
 ### HTML mapping rules
 
 Block matching spans newlines, since model output wraps its markup, and

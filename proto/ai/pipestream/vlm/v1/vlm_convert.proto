@@ -303,8 +303,9 @@ message PageDocument {
   // markdown/HTML/plaintext responses carry the full-page box only.
   ai.pipestream.document.v1.Document document = 2;
   // Where the fragment is less than it should be: something cut to a
-  // server cap rather than mapped whole, or a Nemotron Parse pass that
-  // fell short. Empty when nothing was lost.
+  // server cap rather than mapped whole, a Nemotron Parse pass that fell
+  // short, or part of the answer the mapper could not read. Empty when
+  // nothing was lost.
   repeated PageWarning warnings = 3;
   // The model call that produced this page: the model that answered, the
   // endpoint origin, the stop reason verbatim and classified, the token
@@ -326,7 +327,8 @@ message PageWarning {
   string ref = 3;
 }
 
-// What a page can lose: to a server cap, or to a model call that failed.
+// What a page can lose: to a server cap, to a model call that failed or
+// was cut off, or to output the mapper could not read.
 enum PageWarningCode {
   // Not set. Never emitted by the server.
   PAGE_WARNING_CODE_UNSPECIFIED = 0;
@@ -347,8 +349,9 @@ enum PageWarningCode {
   PAGE_WARNING_CODE_PICTURE_IMAGES_SKIPPED = 3;
   // A Nemotron Parse double or triple pass fell short: the page call did
   // not finish (so nothing was cropped), the detection call or some region
-  // crop calls failed, or the raster could not be cropped. Those regions
-  // keep the page pass text; the message gives the counts.
+  // crop calls failed, the raster could not be cropped, or the page held
+  // more regions than the server crops. Those regions keep the page pass
+  // text; the message gives the counts.
   PAGE_WARNING_CODE_NEMOTRON_PASS_INCOMPLETE = 4;
   // The model returned no text at all for the page, so the fragment has no
   // items. A model that answers with its format's own empty layout (dots.ocr
@@ -362,6 +365,23 @@ enum PageWarningCode {
   // its stop_reason is VLM_STOP_REASON_LENGTH,
   // VLM_STOP_REASON_CONTENT_FILTERED or VLM_STOP_REASON_INFERENCE_ERROR.
   PAGE_WARNING_CODE_GENERATION_TRUNCATED = 6;
+  // The answer breaks off inside its own layout: a dots.ocr array with no
+  // closing bracket after an unfinished element, a Nemotron Parse region
+  // or block that opens and never closes. The fragment holds the complete
+  // elements; the unfinished tail is not mapped. The message gives its
+  // size in bytes.
+  PAGE_WARNING_CODE_OUTPUT_TRUNCATED = 7;
+  // The answer holds elements the mapper could not read and built nothing
+  // from: a dots.ocr array entry that is not an object, or one with
+  // neither a usable box nor text; a Nemotron Parse 3.5 block with text
+  // and fewer than two corner tokens; a DocTags <link_> token whose target
+  // is not a number. The message counts them.
+  PAGE_WARNING_CODE_ELEMENTS_SKIPPED = 8;
+  // The model wrote a location the mapper could not read: a dots.ocr
+  // element whose bbox is missing or is not four numbers, a DocTags <loc_>
+  // token that is not a number. The item is in the fragment with its text,
+  // on the full-page box instead of its own. The message counts them.
+  PAGE_WARNING_CODE_LOCATION_UNREADABLE = 9;
 }
 
 // Unmapped model output or a page failure.
