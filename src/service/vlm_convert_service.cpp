@@ -91,6 +91,15 @@ constexpr auto kCancelPollInterval = std::chrono::milliseconds(50);
 constexpr uint32_t kMaxTopLogprobs = 20;
 
 // PNG signature: 8 bytes, 89 50 4E 47 0D 0A 1A 0A.
+// True for the stop reasons that mean the model did not finish its answer:
+// cut at max_tokens, ended by the endpoint's content filter, or ended by an
+// inference error. An answer with any of these is a short page.
+bool generation_cut_short(docv1::VlmStopReason reason) {
+    return reason == docv1::VLM_STOP_REASON_LENGTH ||
+           reason == docv1::VLM_STOP_REASON_CONTENT_FILTERED ||
+           reason == docv1::VLM_STOP_REASON_INFERENCE_ERROR;
+}
+
 bool is_png(const std::string& bytes) {
     static constexpr char kMagic[8] = {'\x89', 'P', 'N', 'G', '\x0d', '\x0a', '\x1a', '\x0a'};
     return bytes.starts_with(std::string_view(kMagic, sizeof(kMagic)));
@@ -257,6 +266,9 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
     std::atomic<uint32_t> started{0};
     std::atomic<uint32_t> ok{0};
     std::atomic<uint32_t> page_failed{0};
+    // Pages whose answer the model did not finish, whether they then mapped
+    // or not.
+    std::atomic<uint32_t> page_truncated{0};
     // Set once nobody wants this stream's answers any more: the client
     // cancelled, its deadline passed, the consumer stopped taking events,
     // the input turned out bad, or abort_on_error met a failed page.
@@ -376,6 +388,13 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
                 page.generation.set_stop_reason(docv1::VLM_STOP_REASON_INFERENCE_ERROR);
             }
         }
+        // An answer the model did not finish is a short page however well
+        // the part that arrived maps. It is counted here, before mapping,
+        // so a cut answer that no longer parses is counted too.
+        const bool truncated = result.ok && generation_cut_short(page.generation.stop_reason());
+        if (truncated) {
+            page_truncated++;
+        }
         if (result.has_usage) {
             page.generation.set_prompt_tokens(result.prompt_tokens);
             page.generation.set_completion_tokens(result.completion_tokens);
@@ -415,6 +434,18 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
             *document->mutable_generation() = page.generation;
             // What the mapper cut to a server cap rides beside the
             // fragment, so a short table never passes for a complete one.
+            // The same goes for an answer the model did not finish: the
+            // stop reason in each item's source list is easy to miss, and
+            // a fragment with no items has none.
+            if (truncated) {
+                vlmv1::PageWarning& warning = warnings.emplace_back();
+                warning.set_code(vlmv1::PAGE_WARNING_CODE_GENERATION_TRUNCATED);
+                warning.set_message(
+                    "the model's answer ended early (finish reason \"" + result.finish_reason +
+                    "\", " + std::to_string(result.completion_tokens) + " completion tokens, " +
+                    "max_tokens " + std::to_string(job.call.max_tokens) +
+                    "); the page holds only what the answer covered");
+            }
             if (!shortfall.empty()) {
                 vlmv1::PageWarning& warning = warnings.emplace_back();
                 warning.set_code(vlmv1::PAGE_WARNING_CODE_NEMOTRON_PASS_INCOMPLETE);
@@ -626,11 +657,13 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
     trailer->set_pages_started(started.load());
     trailer->set_pages_ok(ok.load());
     trailer->set_pages_failed(page_failed.load());
+    trailer->set_pages_truncated(page_truncated.load());
     write(complete);
 
     converted++;
     pages_ok += ok.load();
     pages_failed += page_failed.load();
+    pages_truncated += page_truncated.load();
     return grpc::Status::OK;
 }
 

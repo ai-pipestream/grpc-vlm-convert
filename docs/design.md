@@ -215,7 +215,9 @@ a multi-pass request for any other format. A failed detection or crop
 call, or a raster that cannot be cropped, keeps the page pass text for
 those regions and adds `PAGE_WARNING_CODE_NEMOTRON_PASS_INCOMPLETE` with
 the counts; a crop the structure check refuses is the check working and
-is not reported. A page's crop calls run beside its page slot only on
+is not reported. A page call that did not finish (cut at `max_tokens`,
+or blank) leaves nothing to crop from: the later passes do not run, and
+the page carries the same warning saying so. A page's crop calls run beside its page slot only on
 in-flight slots that are free right now, so `GRPC_VLM_MAX_INFLIGHT` still
 bounds the calls open on the endpoint.
 
@@ -381,8 +383,15 @@ present.
 
 The `finish_reason` is the load-bearing one: `max_tokens` defaults to
 4096, and a page whose answer hit that ceiling maps into a fragment
-that looks complete and is not. A `"length"` stop reason is the only
-marker that says so.
+that looks complete and is not. A stop reason inside each item's source
+list is easy to miss, so an answer the model did not finish (`"length"`,
+`"content_filter"`, `"inference_error"`) is also reported where a caller
+looks first: the `PageDocument` carries a
+`PAGE_WARNING_CODE_GENERATION_TRUNCATED` warning, and the
+`ConvertComplete` trailer counts the page in `pages_truncated`, whether
+it mapped (`pages_ok`) or no longer parsed (`pages_failed`, a `PageRaw`
+whose `generation` names the stop reason). The interval metrics line
+prints the same count as `pages{truncated=}`.
 
 ### Retries
 

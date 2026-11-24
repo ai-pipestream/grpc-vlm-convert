@@ -98,10 +98,11 @@ int main() {
                     lock, std::chrono::seconds(config.metrics_interval_seconds),
                     [&] { return stopping; })) {
                     std::println("grpc-vlm-convert metrics: streams{{converted={},rejected={},"
-                                 "failed={}}} pages{{ok={},failed={},finished={}}}",
+                                 "failed={}}} pages{{ok={},failed={},truncated={},finished={}}}",
                                  service.converted.load(), service.rejected.load(),
                                  service.failed.load(), service.pages_ok.load(),
-                                 service.pages_failed.load(), service.pages_finished.load());
+                                 service.pages_failed.load(), service.pages_truncated.load(),
+                                 service.pages_finished.load());
                 }
             });
         }
