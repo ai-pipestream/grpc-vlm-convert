@@ -4,15 +4,28 @@
 //
 // Needs GRPC_VLM_TEST_ENDPOINT and GRPC_VLM_TEST_PNG (a real page raster
 // file); skips with 77 otherwise, so CI without a VLM server stays green.
+//
+// A skip is only honest where no VLM server is expected. On a host that
+// has one, GRPC_VLM_TEST_REQUIRE_ENDPOINT=1 turns a missing endpoint or
+// raster into a failure, so a suite that ran no real model cannot pass
+// there. GRPC_VLM_TEST_REQUIRE_DEVICE (e.g. "cuda", "xpu") additionally
+// asks the endpoint's GET /health which device the model is on, as the
+// north-micro-vision server reports it, and fails unless it starts with
+// that name: a model that fell back to CPU answers the golden page just
+// as well, only slower.
 
 #include <grpcpp/grpcpp.h>
 
 #include <fstream>
 #include <string>
 
+#include <httplib.h>
+#include <nlohmann/json.hpp>
+
 #include "config.h"
 #include "fixture.h"
 #include "service/vlm_convert_service.h"
+#include "vlm_client.h"
 
 namespace vlmv1 = ai::pipestream::vlm::v1;
 
@@ -26,18 +39,54 @@ std::string slurp(const std::string& path) {
     return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
 }
 
+// What to do when the test cannot run: skip where a VLM server is
+// optional, fail where GRPC_VLM_TEST_REQUIRE_ENDPOINT says one must be
+// there.
+int cannot_run(const std::string& why) {
+    if (env_or_null("GRPC_VLM_TEST_REQUIRE_ENDPOINT") != nullptr) {
+        std::println(stderr,
+                     "FAIL: {}, and GRPC_VLM_TEST_REQUIRE_ENDPOINT is set: this host must run "
+                     "the golden test, not skip it",
+                     why);
+        return 1;
+    }
+    return skip(why);
+}
+
+// The device the endpoint's model runs on, as its GET /health reports it
+// ("cuda:0", "xpu", "cpu"). Throws when the endpoint has no such route or
+// does not say.
+std::string endpoint_device(const std::string& endpoint) {
+    const std::string origin = vlm::endpoint_origin(endpoint);
+    httplib::Client client(origin);
+    client.set_connection_timeout(10);
+    client.set_read_timeout(30);
+    const auto reply = client.Get("/health");
+    require(reply && reply->status == 200,
+            "GET " + origin + "/health answers 200 (GRPC_VLM_TEST_REQUIRE_DEVICE needs it)");
+    const nlohmann::json health = nlohmann::json::parse(reply->body, nullptr, false);
+    require(health.is_object() && health.contains("device") && health["device"].is_string(),
+            "the endpoint's /health names the model's device");
+    return health["device"].get<std::string>();
+}
+
 }  // namespace
 
-int main() {
+int main() try {
     const char* endpoint = env_or_null("GRPC_VLM_TEST_ENDPOINT");
     const char* png_path = env_or_null("GRPC_VLM_TEST_PNG");
     if (endpoint == nullptr) {
-        return skip("no VLM endpoint at $GRPC_VLM_TEST_ENDPOINT");
+        return cannot_run("no VLM endpoint at $GRPC_VLM_TEST_ENDPOINT");
     }
     if (png_path == nullptr || slurp(png_path).empty()) {
-        return skip("no page raster at $GRPC_VLM_TEST_PNG");
+        return cannot_run("no page raster at $GRPC_VLM_TEST_PNG");
     }
     const std::string png = slurp(png_path);
+    if (const char* wanted = env_or_null("GRPC_VLM_TEST_REQUIRE_DEVICE")) {
+        const std::string device = endpoint_device(endpoint);
+        require(device.starts_with(wanted),
+                "the model runs on " + device + ", not on the required " + wanted);
+    }
 
     vlm::Config config;
     config.endpoint = endpoint;
@@ -98,4 +147,7 @@ int main() {
     server->Shutdown();
     std::println("vlm-golden-test passed");
     return 0;
+} catch (const std::exception& error) {
+    std::println(stderr, "{}", error.what());
+    return 1;
 }

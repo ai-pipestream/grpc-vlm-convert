@@ -1,0 +1,69 @@
+// The JSON bodies of grpc-vlm-convert's HTTP front end, as messages.
+//
+// The front end is a second framing of VlmConvertService, not a second
+// contract: POST /v1/convert reads one ConvertHttpRequest and answers one
+// ConvertHttpResponse, both in protobuf's canonical proto3 JSON. Each body
+// is parsed or printed by one protobuf call on one of these messages, so
+// no JSON is ever assembled or taken apart by hand. gRPC clients never see
+// this file.
+syntax = "proto3";
+
+package ai.pipestream.vlm.v1;
+
+import "ai/pipestream/vlm/v1/vlm_convert.proto";
+
+// The request body of POST /v1/convert and POST /v1/convert/stream: what a
+// gRPC client would send on a ConvertPages stream, in one object.
+message ConvertHttpRequest {
+  // The stream's options. Leaving them out fails INVALID_ARGUMENT, as a
+  // gRPC stream whose first message is not ConvertOptions does.
+  ConvertOptions options = 1;
+  // The pages, in the order a gRPC client would send them.
+  repeated PageImage pages = 2;
+}
+
+// The response body of POST /v1/convert, and the last line of a
+// POST /v1/convert/stream answer that failed. On the stream route every
+// other line is one ConvertPagesResponse.
+message ConvertHttpResponse {
+  // Every event of the stream, in the order the gRPC stream delivers them.
+  // On failure, the events that were produced before it.
+  repeated ConvertPagesResponse events = 1;
+  // Set when the conversion did not end OK: the gRPC status it ended with.
+  // Unset on success.
+  ConvertHttpError error = 2;
+}
+
+// A gRPC status, as the HTTP front end reports it.
+message ConvertHttpError {
+  // The status code.
+  ConvertHttpErrorCode code = 1;
+  // The status message.
+  string message = 2;
+}
+
+// The gRPC status codes a conversion can end with.
+enum ConvertHttpErrorCode {
+  // Not set. Never emitted by the server.
+  CONVERT_HTTP_ERROR_CODE_UNSPECIFIED = 0;
+  // gRPC INVALID_ARGUMENT; HTTP 400.
+  CONVERT_HTTP_ERROR_CODE_INVALID_ARGUMENT = 1;
+  // gRPC FAILED_PRECONDITION; HTTP 500.
+  CONVERT_HTTP_ERROR_CODE_FAILED_PRECONDITION = 2;
+  // gRPC PERMISSION_DENIED; HTTP 403.
+  CONVERT_HTTP_ERROR_CODE_PERMISSION_DENIED = 3;
+  // gRPC UNAUTHENTICATED; HTTP 401.
+  CONVERT_HTTP_ERROR_CODE_UNAUTHENTICATED = 4;
+  // gRPC RESOURCE_EXHAUSTED; HTTP 413.
+  CONVERT_HTTP_ERROR_CODE_RESOURCE_EXHAUSTED = 5;
+  // gRPC UNIMPLEMENTED; HTTP 501.
+  CONVERT_HTTP_ERROR_CODE_UNIMPLEMENTED = 6;
+  // gRPC ABORTED; HTTP 500.
+  CONVERT_HTTP_ERROR_CODE_ABORTED = 7;
+  // gRPC CANCELLED; HTTP 500.
+  CONVERT_HTTP_ERROR_CODE_CANCELLED = 8;
+  // gRPC UNAVAILABLE; HTTP 503.
+  CONVERT_HTTP_ERROR_CODE_UNAVAILABLE = 9;
+  // gRPC INTERNAL, and every code not listed above; HTTP 500.
+  CONVERT_HTTP_ERROR_CODE_INTERNAL = 10;
+}

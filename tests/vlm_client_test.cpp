@@ -45,6 +45,19 @@ struct ScriptableVlm {
     std::string last_target;
     // Set when a parked /hang call saw its caller hang up.
     std::atomic<bool> hang_saw_disconnect{false};
+    // What /refuse answers: a status and a body, as an endpoint that
+    // refuses or fails a call sends them.
+    std::mutex refusal_mutex;
+    int refusal_status = 400;
+    std::string refusal_body;
+    std::string refusal_type = "application/json";
+
+    void refuse_with(int status, std::string body, std::string type = "application/json") {
+        std::lock_guard<std::mutex> lock(refusal_mutex);
+        refusal_status = status;
+        refusal_body = std::move(body);
+        refusal_type = std::move(type);
+    }
 
     std::string target() {
         std::lock_guard<std::mutex> lock(target_mutex);
@@ -146,6 +159,14 @@ struct ScriptableVlm {
                         }
                         response.status = 503;
                     });
+        // An endpoint that refuses the call and says why.
+        server.Post("/refuse/v1/chat/completions",
+                    [this](const httplib::Request&, httplib::Response& response) {
+                        attempts++;
+                        std::lock_guard<std::mutex> lock(refusal_mutex);
+                        response.status = refusal_status;
+                        response.set_content(refusal_body, refusal_type);
+                    });
         // A busy model: 400 ms per attempt, then 503 (retryable).
         server.Post("/slow503/v1/chat/completions",
                     [this](const httplib::Request&, httplib::Response& response) {
@@ -190,6 +211,125 @@ bool wait_until(const std::function<bool()>& condition) {
 std::chrono::milliseconds elapsed_since(std::chrono::steady_clock::time_point started) {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - started);
+}
+
+// A failed call says which way it failed as a value, and an endpoint that
+// answered with an error keeps what it said: "image too large" and a GPU
+// out of memory are both HTTP errors, and only the body tells them apart.
+void verify_failures_are_typed(ScriptableVlm& fake) {
+    using vlm::VlmFailure;
+    const std::string refuse = fake.endpoint() + "/refuse";
+
+    vlm::VlmResult ok = vlm::generate(call_to(fake.endpoint()));
+    require(ok.ok && ok.failure == VlmFailure::kNone && ok.http_status == 0 &&
+                ok.endpoint_message.empty(),
+            "an answer carries no failure");
+
+    // The OpenAI error object.
+    fake.refuse_with(400, R"({"error": {"message": "image too large: 9000x9000 pixels",
+                               "type": "invalid_request_error", "param": null, "code": null}})");
+    vlm::VlmResult refused = vlm::generate(call_to(refuse));
+    require(!refused.ok && refused.failure == VlmFailure::kHttpStatus &&
+                refused.http_status == 400,
+            "a 400 is an HTTP failure with its status");
+    require(refused.endpoint_message == "image too large: 9000x9000 pixels",
+            "the endpoint's error message is kept: " + refused.endpoint_message);
+    require(refused.endpoint_type == "invalid_request_error", "and its error type");
+    require(!refused.endpoint_message_truncated, "a short message is whole");
+    require(refused.error.contains("HTTP 400") &&
+                refused.error.contains("image too large: 9000x9000 pixels"),
+            "the error text names the status and the reason: " + refused.error);
+
+    // llama.cpp spells it the same way, with a numeric code, on a 500 the
+    // client retries first.
+    fake.attempts = 0;
+    fake.refuse_with(500, R"({"error": {"code": 500, "message": "CUDA out of memory",
+                               "type": "server_error"}})");
+    refused = vlm::generate(call_to(refuse));
+    require(refused.failure == VlmFailure::kHttpStatus && refused.http_status == 500 &&
+                refused.endpoint_message == "CUDA out of memory" &&
+                refused.endpoint_type == "server_error",
+            "the last retried reply's body is the one kept: " + refused.endpoint_message);
+    require(fake.attempts.load() == 6, "a 500 is still retried five times");
+
+    // What other servers send in place of the error object.
+    struct Shape {
+        const char* body;
+        const char* type;
+        const char* message;
+        const char* error_type;
+    };
+    for (const Shape& shape : {
+             Shape{R"({"error": "model overloaded"})", "application/json", "model overloaded", ""},
+             Shape{R"({"detail": "request body is above the 1000-byte cap"})",
+                   "application/json", "request body is above the 1000-byte cap", ""},
+             Shape{R"({"object": "error", "message": "context length exceeded",
+                       "type": "BadRequestError", "code": 400})",
+                   "application/json", "context length exceeded", "BadRequestError"},
+             Shape{"upstream connect error\n", "text/plain", "upstream connect error", ""},
+             // Nothing readable: a page of markup, a body that is not what
+             // its content type says, an error object with no message.
+             Shape{"<html><body>Bad Gateway</body></html>", "text/html", "", ""},
+             Shape{"{not json", "application/json", "", ""},
+             Shape{R"({"error": {"code": 400}})", "application/json", "", ""},
+             Shape{R"([1, 2, 3])", "application/json", "", ""},
+             Shape{"", "application/json", "", ""},
+         }) {
+        fake.refuse_with(400, shape.body, shape.type);
+        refused = vlm::generate(call_to(refuse));
+        require(refused.failure == VlmFailure::kHttpStatus && refused.http_status == 400,
+                std::string("still an HTTP failure: ") + shape.body);
+        require(refused.endpoint_message == shape.message && refused.endpoint_type == shape.error_type,
+                std::string("message read from ") + shape.body + ": got \"" +
+                    refused.endpoint_message + "\" / \"" + refused.endpoint_type + "\"");
+        require(refused.error.contains("HTTP 400"), "the status is always in the text");
+    }
+
+    // A long message is cut to the cap on a character boundary, and says
+    // it was cut. "é" is two bytes, so an odd cut would split one.
+    std::string longwinded = "x";
+    for (int i = 0; i < 4000; i++) {
+        longwinded += "\u00e9";
+    }
+    fake.refuse_with(400, "{\"error\": {\"message\": \"" + longwinded + "\", \"type\": \"" +
+                              std::string(500, 't') + "\"}}");
+    refused = vlm::generate(call_to(refuse));
+    require(refused.endpoint_message_truncated, "a long message is marked as cut");
+    require(refused.endpoint_message.size() <= vlm::kMaxEndpointMessageBytes &&
+                refused.endpoint_message.size() >= vlm::kMaxEndpointMessageBytes - 1,
+            "the message is cut to the cap");
+    require(refused.endpoint_message.ends_with("\xc3\xa9"),
+            "the cut falls between characters, never inside one");
+    require(refused.endpoint_type.size() == vlm::kMaxEndpointTypeBytes, "the type is capped too");
+    require(refused.error.size() < 4096, "the error text stays bounded");
+
+    // A plain-text body that is not valid UTF-8 cannot ride a proto string.
+    fake.refuse_with(502, std::string("bad \xff\xfe bytes"), "text/plain");
+    refused = vlm::generate(call_to(refuse));
+    require(refused.failure == VlmFailure::kHttpStatus && refused.endpoint_message.empty(),
+            "bytes that are not text are not kept");
+
+    // The other ways a call fails.
+    vlm::VlmResult unreachable = vlm::generate(call_to("http://127.0.0.1:1"));
+    require(unreachable.failure == VlmFailure::kUnreachable && unreachable.http_status == 0,
+            "nothing listening is unreachable");
+    vlm::VlmResult unusable = vlm::generate(call_to("http://127.0.0.1:99999"));
+    require(unusable.failure == VlmFailure::kInvalidEndpoint, "a bad port is an invalid endpoint");
+    fake.garbage_200 = true;
+    vlm::VlmResult garbage = vlm::generate(call_to(fake.endpoint()));
+    require(garbage.failure == VlmFailure::kMalformedResponse && garbage.http_status == 0,
+            "a 200 that is not a chat completion is malformed");
+    fake.garbage_200 = false;
+    vlm::VlmCall slow = call_to(fake.endpoint() + "/hang");
+    slow.timeout_seconds = 1;
+    vlm::VlmResult timed_out = vlm::generate(slow);
+    require(timed_out.failure == VlmFailure::kTimeout && !timed_out.cancelled,
+            "a call past its budget timed out: " + timed_out.error);
+    vlm::VlmCall cancelled = call_to(fake.endpoint());
+    cancelled.cancelled = [] { return true; };
+    vlm::VlmResult cut = vlm::generate(cancelled);
+    require(cut.failure == VlmFailure::kCancelled && cut.cancelled, "a cancelled call says so");
+    fake.attempts = 0;
 }
 
 // The timeout is a budget for the whole call and the caller's probe ends
@@ -499,6 +639,7 @@ int main() {
         require(failed.error.contains("unreachable"),
                 "connection failure surfaces as unreachable");
 
+        verify_failures_are_typed(fake);
         verify_budget_and_cancellation(fake);
     } catch (const std::exception& error) {
         std::println(stderr, "{}", error.what());

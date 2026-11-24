@@ -81,7 +81,10 @@ set(VLM_PROTOS
   # for Document.analyses (the OpenNLP analyses; this service never fills them).
   "${PROTO_DIR}/org/apache/opennlp/grpc/v1/opennlp_document.proto"
   "${PROTO_DIR}/org/apache/opennlp/grpc/v1/opennlp_annotations.proto"
-  "${PROTO_DIR}/ai/pipestream/vlm/v1/vlm_convert.proto")
+  "${PROTO_DIR}/ai/pipestream/vlm/v1/vlm_convert.proto"
+  # The HTTP front end's JSON bodies as messages; not part of the gRPC
+  # contract, so gRParse does not vendor it.
+  "${PROTO_DIR}/ai/pipestream/vlm/v1/vlm_convert_http.proto")
 set(VLM_GENERATED
   "${GENERATED_DIR}/ai/pipestream/document/v1/document.pb.cc"
   "${GENERATED_DIR}/ai/pipestream/document/v1/document.pb.h"
@@ -92,7 +95,9 @@ set(VLM_GENERATED
   "${GENERATED_DIR}/ai/pipestream/vlm/v1/vlm_convert.pb.cc"
   "${GENERATED_DIR}/ai/pipestream/vlm/v1/vlm_convert.pb.h"
   "${GENERATED_DIR}/ai/pipestream/vlm/v1/vlm_convert.grpc.pb.cc"
-  "${GENERATED_DIR}/ai/pipestream/vlm/v1/vlm_convert.grpc.pb.h")
+  "${GENERATED_DIR}/ai/pipestream/vlm/v1/vlm_convert.grpc.pb.h"
+  "${GENERATED_DIR}/ai/pipestream/vlm/v1/vlm_convert_http.pb.cc"
+  "${GENERATED_DIR}/ai/pipestream/vlm/v1/vlm_convert_http.pb.h")
 
 add_custom_command(
   OUTPUT ${VLM_GENERATED}
@@ -112,7 +117,8 @@ add_library(vlm_proto STATIC
   "${GENERATED_DIR}/org/apache/opennlp/grpc/v1/opennlp_document.pb.cc"
   "${GENERATED_DIR}/org/apache/opennlp/grpc/v1/opennlp_annotations.pb.cc"
   "${GENERATED_DIR}/ai/pipestream/vlm/v1/vlm_convert.pb.cc"
-  "${GENERATED_DIR}/ai/pipestream/vlm/v1/vlm_convert.grpc.pb.cc")
+  "${GENERATED_DIR}/ai/pipestream/vlm/v1/vlm_convert.grpc.pb.cc"
+  "${GENERATED_DIR}/ai/pipestream/vlm/v1/vlm_convert_http.pb.cc")
 target_include_directories(vlm_proto PUBLIC "${GENERATED_DIR}")
 target_link_libraries(vlm_proto PUBLIC grpc++)
 
@@ -161,7 +167,8 @@ install(TARGETS grpc-vlm-convert-server RUNTIME DESTINATION bin)
 # ---------------------------------------------------------------------------
 # Tests: plain int main() executables under CTest, fleet style. The golden
 # test needs a live VLM endpoint and skips with 77 when none is configured,
-# so the suite stays green on a bare checkout.
+# so the suite stays green on a bare checkout; on a host that has one,
+# GRPC_VLM_TEST_REQUIRE_ENDPOINT=1 makes that skip a failure.
 # ---------------------------------------------------------------------------
 if(BUILD_TESTING)
   set(GRPC_VLM_TESTS
@@ -187,4 +194,13 @@ if(BUILD_TESTING)
   add_custom_target(grpc-vlm-convert-tests DEPENDS ${GRPC_VLM_TESTS})
   set_tests_properties(${GRPC_VLM_TESTS} PROPERTIES TIMEOUT 300 LABELS vlm)
   set_tests_properties(vlm-golden-test PROPERTIES SKIP_RETURN_CODE 77)
+  # Where a VLM endpoint is required the golden test must fail, not skip,
+  # when it has none. This runs it that way with no endpoint and passes
+  # only if it refused, so the requirement itself is under test everywhere.
+  add_test(NAME vlm-golden-required-test COMMAND vlm-golden-test)
+  set_tests_properties(vlm-golden-required-test PROPERTIES
+    ENVIRONMENT "GRPC_VLM_TEST_REQUIRE_ENDPOINT=1;GRPC_VLM_TEST_ENDPOINT=;GRPC_VLM_TEST_PNG="
+    PASS_REGULAR_EXPRESSION "GRPC_VLM_TEST_REQUIRE_ENDPOINT is set"
+    TIMEOUT 60
+    LABELS vlm)
 endif()

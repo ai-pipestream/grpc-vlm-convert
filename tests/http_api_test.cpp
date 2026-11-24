@@ -20,6 +20,7 @@
 #include <httplib.h>
 #include <nlohmann/json.hpp>
 
+#include "ai/pipestream/vlm/v1/vlm_convert_http.pb.h"
 #include "config.h"
 #include "endpoint_health.h"
 #include "fixture.h"
@@ -97,12 +98,16 @@ struct FakeVlm {
                 response.set_content("{\"error\":\"model overloaded\"}", "application/json");
                 return;
             }
+            // RAWTEXT pages answer outside the DocTags format, so they fail
+            // to map and come back as a PageRaw.
             const std::string content =
-                "<doctag>"
-                "<section_header_level_1><loc_50><loc_100><loc_400><loc_150>Fake Heading"
-                "</section_header_level_1>"
-                "<text><loc_50><loc_200><loc_400><loc_260>Fake body text.</text>"
-                "</doctag>";
+                png.contains("RAWTEXT")
+                    ? "just plain words with no markup"
+                    : "<doctag>"
+                      "<section_header_level_1><loc_50><loc_100><loc_400><loc_150>Fake Heading"
+                      "</section_header_level_1>"
+                      "<text><loc_50><loc_200><loc_400><loc_260>Fake body text.</text>"
+                      "</doctag>";
             nlohmann::json reply = {
                 {"choices", {{{"message", {{"role", "assistant"}, {"content", content}}}}}},
             };
@@ -157,15 +162,25 @@ nlohmann::json proto_json(const google::protobuf::Message& message) {
     return nlohmann::json::parse(json);
 }
 
+// The request body, built as the message it is and printed by protobuf.
 nlohmann::json convert_body(const vlmv1::ConvertOptions& options,
                             const std::vector<vlmv1::PageImage>& pages) {
-    nlohmann::json body;
-    body["options"] = proto_json(options);
-    body["pages"] = nlohmann::json::array();
+    vlmv1::ConvertHttpRequest body;
+    *body.mutable_options() = options;
     for (const vlmv1::PageImage& image : pages) {
-        body["pages"].push_back(proto_json(image));
+        *body.add_pages() = image;
     }
-    return body;
+    return proto_json(body);
+}
+
+// A response body, read back as the message it is: a body that does not
+// parse as a ConvertHttpResponse is not one.
+vlmv1::ConvertHttpResponse response_of(const std::string& body) {
+    vlmv1::ConvertHttpResponse response;
+    const auto status = google::protobuf::util::JsonStringToMessage(body, &response);
+    require(status.ok(), "the body is a ConvertHttpResponse: " + std::string(status.message()) +
+                             " in " + body.substr(0, 200));
+    return response;
 }
 
 void verify_healthz(httplib::Client& client) {
@@ -252,8 +267,9 @@ void verify_sync_happy_path(httplib::Client& client) {
 void verify_sync_garbage_json(httplib::Client& client) {
     auto result = client.Post("/v1/convert", "this is not json", "application/json");
     require(result && result->status == 400, "garbage JSON is 400");
-    const nlohmann::json body = nlohmann::json::parse(result->body);
-    require(body["error"]["code"] == "INVALID_ARGUMENT", "garbage JSON names INVALID_ARGUMENT");
+    const vlmv1::ConvertHttpResponse body = response_of(result->body);
+    require(body.error().code() == vlmv1::CONVERT_HTTP_ERROR_CODE_INVALID_ARGUMENT,
+            "garbage JSON names INVALID_ARGUMENT");
 }
 
 void verify_sync_non_png(httplib::Client& client) {
@@ -263,10 +279,10 @@ void verify_sync_non_png(httplib::Client& client) {
     auto result =
         client.Post("/v1/convert", convert_body(options, {not_png}).dump(), "application/json");
     require(result && result->status == 400, "non-PNG page is 400");
-    const nlohmann::json body = nlohmann::json::parse(result->body);
-    require(body["error"]["code"] == "INVALID_ARGUMENT", "non-PNG names INVALID_ARGUMENT");
-    require(body["error"]["message"].get<std::string>().contains("PNG"),
-            "the message says why");
+    const vlmv1::ConvertHttpResponse body = response_of(result->body);
+    require(body.error().code() == vlmv1::CONVERT_HTTP_ERROR_CODE_INVALID_ARGUMENT,
+            "non-PNG names INVALID_ARGUMENT");
+    require(body.error().message().contains("PNG"), "the message says why");
 }
 
 // An endpoint override without the operator's opt-in is PERMISSION_DENIED,
@@ -277,8 +293,9 @@ void verify_sync_override_refused(httplib::Client& client) {
     auto result = client.Post("/v1/convert", convert_body(options, {page(1, "PAGE1")}).dump(),
                               "application/json");
     require(result && result->status == 403, "a refused override is 403");
-    const nlohmann::json body = nlohmann::json::parse(result->body);
-    require(body["error"]["code"] == "PERMISSION_DENIED", "403 names PERMISSION_DENIED");
+    const vlmv1::ConvertHttpResponse body = response_of(result->body);
+    require(body.error().code() == vlmv1::CONVERT_HTTP_ERROR_CODE_PERMISSION_DENIED,
+            "403 names PERMISSION_DENIED");
 }
 
 // Collects an NDJSON response incrementally; lines() splits what has
@@ -387,39 +404,172 @@ void verify_stream_flushes_per_event(httplib::Client& client, FakeVlm& fake) {
     require(saw_doc2, "the held page converts after release");
 }
 
-// Envelope-shape errors from the JSON layer: options must be an object
-// (proto3 JSON), pages must be an array, and an empty envelope reaches
-// the pipeline's own "no pages" rejection.
+// Body-shape errors: the body is one ConvertHttpRequest in proto3 JSON,
+// read by protobuf in one pass, so options must be an object, pages an
+// array, and a field the message does not have is refused rather than
+// read past. An empty body reaches the pipeline's own rejections.
 void verify_envelope_shapes(httplib::Client& client) {
-    auto result = client.Post("/v1/convert", "{\"options\":5,\"pages\":[]}",
-                              "application/json");
-    require(result && result->status == 400, "non-object options is 400");
-    nlohmann::json body = nlohmann::json::parse(result->body);
-    require(body["error"]["code"] == "INVALID_ARGUMENT", "non-object options names the code");
-    require(body["error"]["message"].get<std::string>().starts_with("options"),
-            "the message points at options");
+    for (const char* malformed :
+         {"{\"options\":5,\"pages\":[]}", "{\"options\":{},\"pages\":5}", "[]", "\"text\"",
+          "{\"options\":{\"concurrency\":\"many\"},\"pages\":[]}"}) {
+        auto result = client.Post("/v1/convert", malformed, "application/json");
+        require(result && result->status == 400, std::string("400 for ") + malformed);
+        const vlmv1::ConvertHttpResponse body = response_of(result->body);
+        require(body.error().code() == vlmv1::CONVERT_HTTP_ERROR_CODE_INVALID_ARGUMENT &&
+                    body.error().message().starts_with("request body is not a convert request"),
+                std::string("the message says the body is not a request: ") + malformed);
+        require(body.events().empty(), "a refused body produced no events");
+    }
 
-    result = client.Post("/v1/convert", "{\"pages\":{}}", "application/json");
-    require(result && result->status == 400, "non-array pages is 400");
-    body = nlohmann::json::parse(result->body);
-    require(body["error"]["message"] == "pages must be an array", "the message points at pages");
+    // A field the request does not have is a mistake in the request (a
+    // misspelt "pages" would otherwise convert nothing and say so only by
+    // omission).
+    nlohmann::json misspelt = convert_body(vlmv1::ConvertOptions(), {page(1, "PAGE1")});
+    misspelt["page"] = misspelt["pages"];
+    auto result = client.Post("/v1/convert", misspelt.dump(), "application/json");
+    require(result && result->status == 400, "an unknown field is 400");
+    require(response_of(result->body).error().message().contains("page"),
+            "the message names the unknown field: " + result->body);
 
     // An absent options object becomes an empty-payload first message,
     // so the pipeline's own first-message rule fires.
     result = client.Post("/v1/convert", "{}", "application/json");
     require(result && result->status == 400, "empty envelope is 400");
-    body = nlohmann::json::parse(result->body);
-    require(body["error"]["code"] == "INVALID_ARGUMENT" &&
-                body["error"]["message"].get<std::string>().contains("ConvertOptions"),
+    vlmv1::ConvertHttpResponse body = response_of(result->body);
+    require(body.error().code() == vlmv1::CONVERT_HTTP_ERROR_CODE_INVALID_ARGUMENT &&
+                body.error().message().contains("ConvertOptions"),
             "empty envelope trips the first-message rule");
 
     // Options present but no pages reaches the no-pages rejection.
     result = client.Post("/v1/convert", "{\"options\":{},\"pages\":[]}",
                          "application/json");
     require(result && result->status == 400, "pageless request is 400");
-    body = nlohmann::json::parse(result->body);
-    require(body["error"]["message"].get<std::string>().contains("no pages"),
+    body = response_of(result->body);
+    require(body.error().message().contains("no pages"),
             "pageless request reaches the pipeline's no-pages rejection");
+
+    // The stream route refuses the same bodies the same way.
+    result = client.Post("/v1/convert/stream", "{\"options\":5}", "application/json");
+    require(result && result->status == 400 &&
+                response_of(result->body).error().code() ==
+                    vlmv1::CONVERT_HTTP_ERROR_CODE_INVALID_ARGUMENT,
+            "the stream route answers a malformed body with the same error body");
+}
+
+// Both routes answer with messages: the whole /v1/convert body reads back
+// as one ConvertHttpResponse whose events are the stream's own, and each
+// /v1/convert/stream line as one ConvertPagesResponse.
+void verify_bodies_are_messages(httplib::Client& client) {
+    vlmv1::ConvertOptions options;
+    auto result = client.Post("/v1/convert",
+                              convert_body(options, {page(1, "PAGE1"), page(2, "RAWTEXT2")}).dump(),
+                              "application/json");
+    require(result && result->status == 200, "sync convert is 200");
+    const vlmv1::ConvertHttpResponse body = response_of(result->body);
+    require(!body.has_error(), "no error on a stream that ended OK");
+    require(body.events_size() == 5 && body.events(4).has_complete(),
+            "two started, a document, a raw and the trailer, trailer last");
+    int documents = 0, raws = 0;
+    for (const vlmv1::ConvertPagesResponse& event : body.events()) {
+        documents += event.has_page_document() ? 1 : 0;
+        if (event.has_page_raw()) {
+            raws++;
+            require(event.page_raw().error_code() == vlmv1::PAGE_ERROR_CODE_UNMAPPABLE_OUTPUT,
+                    "the typed page error survives the JSON framing");
+        }
+    }
+    require(documents == 1 && raws == 1, "one page mapped and one did not");
+    require(body.events(4).complete().pages_ok() == 1 &&
+                body.events(4).complete().pages_failed() == 1,
+            "trailer counts");
+
+    Ndjson sink;
+    std::jthread worker = post_stream(client, convert_body(options, {page(1, "PAGE1")}), sink);
+    worker.join();
+    const std::vector<std::string> lines = sink.lines();
+    require(lines.size() == 3, "started, document, trailer");
+    for (const std::string& line : lines) {
+        vlmv1::ConvertPagesResponse event;
+        require(google::protobuf::util::JsonStringToMessage(line, &event).ok() &&
+                    event.event_case() != vlmv1::ConvertPagesResponse::EVENT_NOT_SET,
+                "every line of a stream that ended OK is one event: " + line.substr(0, 120));
+    }
+}
+
+// A stream on which the endpoint served nothing is 503 with the events it
+// did produce, not a 200 whose events all happen to be failures.
+void verify_endpoint_failure_is_503(httplib::Client& client) {
+    vlmv1::ConvertOptions options;
+    auto result = client.Post("/v1/convert", convert_body(options, {page(1, "FAIL1")}).dump(),
+                              "application/json");
+    require(result && result->status == 503, "an endpoint that served nothing is 503, got " +
+                                                 std::to_string(result ? result->status : 0));
+    const vlmv1::ConvertHttpResponse body = response_of(result->body);
+    require(body.error().code() == vlmv1::CONVERT_HTTP_ERROR_CODE_UNAVAILABLE,
+            "the error names UNAVAILABLE");
+    require(body.events_size() == 3 && body.events(1).has_page_raw() &&
+                body.events(1).page_raw().error_code() ==
+                    vlmv1::PAGE_ERROR_CODE_ENDPOINT_HTTP_ERROR &&
+                body.events(1).page_raw().endpoint_error().http_status() == 503 &&
+                body.events(2).has_complete(),
+            "the page failure and the trailer ride along");
+
+    Ndjson sink;
+    std::jthread worker = post_stream(client, convert_body(options, {page(1, "FAIL1")}), sink);
+    worker.join();
+    const std::vector<std::string> lines = sink.lines();
+    require(lines.size() == 4, "started, raw, trailer, then the error line");
+    require(response_of(lines.back()).error().code() ==
+                vlmv1::CONVERT_HTTP_ERROR_CODE_UNAVAILABLE,
+            "the stream route ends with the UNAVAILABLE error line");
+}
+
+// An event protobuf cannot print is this server's failure. It must not
+// pass for the caller hanging up (CANCELLED), and on the buffered route it
+// must not come back as a 200 missing an event.
+void verify_unprintable_event_is_internal(FakeVlm& fake) {
+    vlm::Config config;
+    config.endpoint = fake.endpoint();
+    HttpTestServer server(std::move(config));
+    // Refuses any message that holds a PageDocument, prints the rest.
+    server.gateway.set_json_printer(
+        [](const google::protobuf::Message& message, std::string* json) {
+            auto holds_document = [](const vlmv1::ConvertPagesResponse& event) {
+                return event.has_page_document();
+            };
+            if (message.GetDescriptor() == vlmv1::ConvertPagesResponse::descriptor() &&
+                holds_document(static_cast<const vlmv1::ConvertPagesResponse&>(message))) {
+                return false;
+            }
+            if (message.GetDescriptor() == vlmv1::ConvertHttpResponse::descriptor()) {
+                for (const auto& event :
+                     static_cast<const vlmv1::ConvertHttpResponse&>(message).events()) {
+                    if (holds_document(event)) {
+                        return false;
+                    }
+                }
+            }
+            return google::protobuf::util::MessageToJsonString(message, json).ok();
+        });
+    const nlohmann::json request = convert_body(vlmv1::ConvertOptions(), {page(1, "PAGE1")});
+
+    auto result = server.client.Post("/v1/convert", request.dump(), "application/json");
+    require(result && result->status == 500, "an unprintable body is 500, got " +
+                                                 std::to_string(result ? result->status : 0));
+    const vlmv1::ConvertHttpResponse body = response_of(result->body);
+    require(body.error().code() == vlmv1::CONVERT_HTTP_ERROR_CODE_INTERNAL &&
+                body.error().message().contains("serialization"),
+            "the buffered route names INTERNAL: " + result->body);
+
+    Ndjson sink;
+    std::jthread worker = post_stream(server.client, request, sink);
+    worker.join();
+    const std::vector<std::string> lines = sink.lines();
+    require(!lines.empty(), "the stream route still answers");
+    const vlmv1::ConvertHttpResponse last = response_of(lines.back());
+    require(last.error().code() == vlmv1::CONVERT_HTTP_ERROR_CODE_INTERNAL,
+            "the stream route ends with INTERNAL, not CANCELLED: " + lines.back());
+    server.stop();
 }
 
 // The body is capped at the transport: past http_max_body_bytes httplib
@@ -435,7 +585,8 @@ void verify_body_cap(FakeVlm& fake) {
     require(result && result->status == 413, "a body over the cap is 413");
     result = server.client.Post("/v1/convert", std::string(64 * 1024, 'x'), "application/json");
     require(result && result->status == 400, "a body at the cap reaches the handler");
-    require(nlohmann::json::parse(result->body)["error"]["code"] == "INVALID_ARGUMENT",
+    require(response_of(result->body).error().code() ==
+                vlmv1::CONVERT_HTTP_ERROR_CODE_INVALID_ARGUMENT,
             "the at-cap body fails as JSON, not at the transport");
     server.stop();
 }
@@ -482,9 +633,10 @@ void verify_token(FakeVlm& fake) {
 
     auto result = server.client.Post("/v1/convert", body, "application/json");
     require(result && result->status == 401, "no token is 401");
-    nlohmann::json json = nlohmann::json::parse(result->body);
-    require(json["error"]["code"] == "UNAUTHENTICATED" && json["events"].is_array(),
-            "401 names UNAUTHENTICATED in the convert envelope");
+    const vlmv1::ConvertHttpResponse refusal = response_of(result->body);
+    require(refusal.error().code() == vlmv1::CONVERT_HTTP_ERROR_CODE_UNAUTHENTICATED &&
+                refusal.events().empty(),
+            "401 names UNAUTHENTICATED in the convert response body");
     require(!result->body.contains("t0ken"), "the 401 never echoes the token");
 
     result = server.client.Post("/v1/convert", httplib::Headers{{"Authorization", "Bearer nope"}},
@@ -512,13 +664,13 @@ void verify_abort_on_error_sync(httplib::Client& client) {
                               convert_body(options, {page(1, "PAGE1"), page(2, "FAIL2")}).dump(),
                               "application/json");
     require(result && result->status == 500, "abort_on_error maps ABORTED to 500");
-    const nlohmann::json body = nlohmann::json::parse(result->body);
-    require(body["error"]["code"] == "ABORTED", "the error names ABORTED");
-    require(body["events"].is_array() && !body["events"].empty(),
-            "events collected before the abort still come back");
+    const vlmv1::ConvertHttpResponse body = response_of(result->body);
+    require(body.error().code() == vlmv1::CONVERT_HTTP_ERROR_CODE_ABORTED,
+            "the error names ABORTED");
+    require(!body.events().empty(), "events collected before the abort still come back");
     bool saw_raw = false;
-    for (const auto& event : body["events"]) {
-        if (event.contains("pageRaw") && event["pageRaw"]["pageNo"] == 2) {
+    for (const vlmv1::ConvertPagesResponse& event : body.events()) {
+        if (event.has_page_raw() && event.page_raw().page_no() == 2) {
             saw_raw = true;
         }
     }
@@ -536,8 +688,7 @@ void verify_abort_on_error_stream(httplib::Client& client) {
     require(wait_for(sink, "\"error\""), "the error line arrives");
     const std::vector<std::string> lines = sink.lines();
     require(!lines.empty(), "lines collected");
-    const nlohmann::json last = nlohmann::json::parse(lines.back());
-    require(last.contains("error") && last["error"]["code"] == "ABORTED",
+    require(response_of(lines.back()).error().code() == vlmv1::CONVERT_HTTP_ERROR_CODE_ABORTED,
             "mid-stream failure ends the NDJSON with an error line");
 }
 
@@ -562,6 +713,8 @@ int main() {
         verify_sync_override_refused(server.client);
         verify_stream_flushes_per_event(server.client, fake);
         verify_envelope_shapes(server.client);
+        verify_bodies_are_messages(server.client);
+        verify_endpoint_failure_is_503(server.client);
         verify_abort_on_error_sync(server.client);
         verify_abort_on_error_stream(server.client);
         server.stop();
@@ -570,6 +723,7 @@ int main() {
         verify_disconnect_stops_pipeline(fake, "/v1/convert");
         verify_disconnect_stops_pipeline(fake, "/v1/convert/stream");
         verify_token(fake);
+        verify_unprintable_event_is_internal(fake);
     } catch (const std::exception& error) {
         std::println(stderr, "{}", error.what());
         fake.stop();

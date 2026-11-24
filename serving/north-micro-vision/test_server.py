@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+import json
 import pathlib
 import sys
 import types
@@ -151,6 +152,21 @@ class GuardTest(unittest.TestCase):
         self.assertEqual((status, reached), (200, True))
         status, reached = self.run_guard("/health", {}, api_key=key)
         self.assertEqual((status, reached), (200, True))
+
+    def test_refusal_body_is_json_whatever_the_detail_says(self) -> None:
+        # The refusal is what a client parses to learn why it was turned
+        # away; a quote or a backslash in the reason must not break it.
+        sent: list[dict[str, Any]] = []
+
+        async def send(message: dict[str, Any]) -> None:
+            sent.append(message)
+
+        detail = 'header "X-Thing" is malformed: \\ and a\nnewline'
+        asyncio.run(server.Guard.refuse(send, 400, detail))
+        body = sent[1]["body"]
+        self.assertEqual(json.loads(body), {"detail": detail})
+        headers = dict(sent[0]["headers"])
+        self.assertEqual(headers[b"content-length"], str(len(body)).encode())
 
     def test_no_key_configured_leaves_the_api_open(self) -> None:
         status, reached = self.run_guard("/v1/models", {})
