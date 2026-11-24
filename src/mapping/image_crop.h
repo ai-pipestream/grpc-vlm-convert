@@ -29,16 +29,16 @@ constexpr size_t kDefaultMaxInlineCropBytes = 3ULL * 1024 * 1024;
 
 // What one page may spend on crops: a model repeating <picture> must not
 // multiply the page into its own fragment (each crop is re-encoded and
-// inlined as a data URI).
+// inlined as PNG bytes in ImageRef.data).
 struct CropBudget {
     // Crops per page.
     size_t max_crops = 100;
     // Cropped pixels per page, as a multiple of the page raster's pixels.
     double max_area_pages = 2.0;
-    // Bytes of inline images per page, counted as the data URIs that ride
-    // the fragment. A near-full-page crop at 300 DPI alone can come close
-    // to a client's message limit; once a crop would cross this cap, it
-    // and every later crop on the page are skipped.
+    // Bytes of inline images per page, counted as the PNG bytes that ride
+    // the fragment in ImageRef.data. A near-full-page crop at 300 DPI
+    // alone can come close to a client's message limit; once a crop would
+    // cross this cap, it and every later crop on the page are skipped.
     size_t max_inline_bytes = kDefaultMaxInlineCropBytes;
 };
 
@@ -63,14 +63,15 @@ class PageRaster {
     PageRaster& operator=(const PageRaster&) = delete;
 
     // Crops [left, top, right, bottom] (pixels in the declared page raster
-    // coordinates, TOPLEFT) and fills `image` with the crop as a PNG data
-    // URI when it returns kAttached; `image` is untouched otherwise.
+    // coordinates, TOPLEFT) and fills `image` with the crop as PNG bytes
+    // (ImageRef.data, mimetype image/png, uri unset) when it returns
+    // kAttached; `image` is untouched otherwise.
     Crop crop(double left, double top, double right, double bottom,
               ai::pipestream::document::v1::ImageRef* image);
 
     // How many times the raster was decoded (0 or 1).
     int decodes() const { return decodes_; }
-    // Bytes of data URIs attached so far.
+    // PNG bytes attached so far.
     size_t inline_bytes() const { return inline_bytes_; }
     // The raster's size as its header declares it; zero until a crop asked.
     uint32_t width() const { return static_cast<uint32_t>(width_); }

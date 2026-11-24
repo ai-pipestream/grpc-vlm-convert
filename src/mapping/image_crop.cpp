@@ -21,27 +21,6 @@ namespace vlm::mapping {
 
 namespace {
 
-std::string base64_encode(const unsigned char* bytes, size_t size) {
-    static const char kAlphabet[] =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    std::string out;
-    out.reserve((size + 2) / 3 * 4);
-    for (size_t i = 0; i < size; i += 3) {
-        unsigned group = static_cast<unsigned>(bytes[i]) << 16;
-        if (i + 1 < size) {
-            group |= static_cast<unsigned>(bytes[i + 1]) << 8;
-        }
-        if (i + 2 < size) {
-            group |= static_cast<unsigned>(bytes[i + 2]);
-        }
-        out.push_back(kAlphabet[(group >> 18) & 63]);
-        out.push_back(kAlphabet[(group >> 12) & 63]);
-        out.push_back(i + 1 < size ? kAlphabet[(group >> 6) & 63] : '=');
-        out.push_back(i + 2 < size ? kAlphabet[group & 63] : '=');
-    }
-    return out;
-}
-
 struct PngSink {
     std::string bytes;
 };
@@ -149,21 +128,22 @@ PageRaster::Crop PageRaster::crop(double left, double top, double right, double 
         return Crop::kFailed;
     }
 
-    std::string uri = "data:image/png;base64," +
-                      base64_encode(reinterpret_cast<const unsigned char*>(sink.bytes.data()),
-                                    sink.bytes.size());
-    // Subtraction, not addition: inline_bytes_ never exceeds the cap.
-    if (uri.size() > budget_.max_inline_bytes - inline_bytes_) {
+    // The cap counts the PNG bytes themselves: they ride the fragment as
+    // ImageRef.data, byte for byte. Subtraction, not addition: inline_bytes_
+    // never exceeds the cap.
+    if (sink.bytes.size() > budget_.max_inline_bytes - inline_bytes_) {
         inline_bytes_spent_ = true;
         return Crop::kOverByteCap;
     }
-    inline_bytes_ += uri.size();
+    inline_bytes_ += sink.bytes.size();
 
     image->set_mimetype("image/png");
     image->set_dpi(72);  // docling's ImageRef.from_pil default
     image->mutable_size()->set_width(crop_w);
     image->mutable_size()->set_height(crop_h);
-    image->set_uri(std::move(uri));
+    // The bytes go in the typed field. `uri` stays unset: it is for a
+    // reference to an image held elsewhere, not for bytes spelled as text.
+    image->set_data(std::move(sink.bytes));
     return Crop::kAttached;
 }
 

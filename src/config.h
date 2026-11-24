@@ -47,7 +47,8 @@ struct Config {
     size_t max_page_bytes = 32ULL * 1024 * 1024;
     size_t max_pages = 512;
     // Bytes of picture crops one PageDocument may carry inline
-    // (GRPC_VLM_MAX_PAGE_CROP_BYTES, as data URIs). Past it the page's
+    // (GRPC_VLM_MAX_PAGE_CROP_BYTES, counted as the PNG bytes in
+    // ImageRef.data). Past it the page's
     // remaining pictures go without an image and a PageWarning says so;
     // the default keeps a page under gRPC's default 4 MiB receive limit.
     size_t max_page_crop_bytes = 3ULL * 1024 * 1024;
