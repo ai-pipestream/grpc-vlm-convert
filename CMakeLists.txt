@@ -123,6 +123,7 @@ add_library(vlm_core STATIC
   src/config.cpp
   src/presets.cpp
   src/vlm_client.cpp
+  src/endpoint_health.cpp
   src/http_gateway.cpp
   src/mapping/mapper.cpp
   src/mapping/doctags.cpp
@@ -168,6 +169,7 @@ if(BUILD_TESTING)
     config-test
     docling-formats-test
     doctags-mapper-test
+    endpoint-health-test
     http-api-test
     markdown-mapper-test
     nemotron-multipass-test

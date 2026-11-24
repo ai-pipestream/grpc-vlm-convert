@@ -65,6 +65,7 @@ Configuration is entirely `GRPC_VLM_*` environment variables:
 | `GRPC_VLM_MAX_BUFFERED_BYTES` | 16 × `GRPC_VLM_MAX_PAGE_BYTES` | The same bound across every stream on both transports. At least `GRPC_VLM_MAX_PAGE_BYTES` |
 | `GRPC_VLM_VLM_TIMEOUT_SECONDS` | `300` | Wall-clock budget for one page's whole VLM call: every attempt and every retry backoff spend from it, and an endpoint that drips bytes cannot stretch it. A cancelled stream or an expired client deadline ends the call sooner, mid-attempt included |
 | `GRPC_VLM_METRICS_INTERVAL_SECONDS` | `60` | Stdout metrics line interval, 0 disables |
+| `GRPC_VLM_HEALTH_PROBE_SECONDS` | `15` | Seconds between health probes of the configured endpoint (a `GET` of its `/v1/models`, with the API key when one is set). gRPC health and `/healthz` report not serving until a probe passes and whenever one fails: nothing answers, a 5xx (a model still loading), or 401/403. `0` turns the probe off; health then says only whether an endpoint is configured |
 | `GRPC_VLM_HTTP_PORT` | `50059` | HTTP/JSON front-end port; `0` or empty disables the listener |
 | `GRPC_VLM_HTTP_HOST` | `127.0.0.1` | Address the HTTP front end binds. Any non-loopback host (`0.0.0.0` in a container) requires `GRPC_VLM_HTTP_TOKEN`, or the server refuses to start |
 | `GRPC_VLM_HTTP_TOKEN` | *(empty)* | Bearer token every HTTP convert request must carry (`Authorization: Bearer <token>`); `/healthz` stays open. Wrong or missing is 401, checked before the body is read. Never logged |
@@ -120,7 +121,8 @@ curl -sN http://localhost:50059/v1/convert/stream -d '{"options": {}, "pages": [
 A caller that hangs up stops its conversion on either route: queued pages
 are skipped and the VLM call in flight is cut, so nothing more is paid for.
 
-`GET /healthz` returns `200 ok`.
+`GET /healthz` returns `200 ok` while the VLM endpoint serves and
+`503 not serving: <reason>` while it does not.
 
 ## gRPC stream
 
@@ -134,7 +136,11 @@ caps, ...), and an answer the model did not finish (cut off at
 `max_tokens`) as `PAGE_WARNING_CODE_GENERATION_TRUNCATED`. A
 `ConvertComplete` trailer closes the stream and counts such pages in
 `pages_truncated`. Health
-(`grpc.health.v1.Health`) and server reflection are registered.
+(`grpc.health.v1.Health`) and server reflection are registered. Health
+follows the VLM endpoint, not the process: it is `NOT_SERVING` with no
+endpoint a stream could use (`GRPC_VLM_ENDPOINT` empty and overrides off),
+until the endpoint's model list first answers, and whenever it stops
+answering (`GRPC_VLM_HEALTH_PROBE_SECONDS`); each change is logged.
 `GetServiceInfo` also carries a `UiInfo` block (title, path,
 description) advertising this service's tab to the shared demo shell.
 

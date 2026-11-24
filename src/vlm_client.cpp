@@ -311,6 +311,20 @@ std::string endpoint_origin(const std::string& endpoint) {
     return parsed.origin;
 }
 
+std::optional<ModelsRoute> models_route(const std::string& endpoint) {
+    ParsedEndpoint parsed;
+    if (!parse_endpoint(endpoint, &parsed).empty()) {
+        return std::nullopt;
+    }
+    // parse_endpoint always ends the path in /chat/completions.
+    constexpr std::string_view kChat = "/chat/completions";
+    const size_t question = parsed.target.find('?');
+    std::string path = parsed.target.substr(0, question);
+    const std::string query = question == std::string::npos ? "" : parsed.target.substr(question);
+    path.resize(path.size() - kChat.size());
+    return ModelsRoute{.origin = parsed.origin, .target = path + "/models" + query};
+}
+
 bool same_endpoint(const std::string& left, const std::string& right) {
     ParsedEndpoint a, b;
     if (!parse_endpoint(left, &a).empty() || !parse_endpoint(right, &b).empty()) {

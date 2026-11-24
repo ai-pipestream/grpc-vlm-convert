@@ -16,6 +16,7 @@
 #include <grpcpp/health_check_service_interface.h>
 
 #include "config.h"
+#include "endpoint_health.h"
 #include "http_gateway.h"
 #include "service/vlm_convert_service.h"
 
@@ -67,11 +68,27 @@ int main() {
             return 1;
         }
 
+        // Health follows the VLM endpoint: NOT_SERVING until its model
+        // list answers, and again whenever it stops answering. The first
+        // probe runs here, before the listening line, so an orchestrator
+        // never sees SERVING from a process whose endpoint is down.
+        grpc::HealthCheckServiceInterface* health = server->GetHealthCheckService();
+        vlm::publish_health(health, {.serving = false, .detail = "starting"});
+        vlm::EndpointMonitor endpoint_monitor(
+            config, std::chrono::seconds(config.health_probe_seconds),
+            [health](const vlm::EndpointHealth& verdict) {
+                vlm::publish_health(health, verdict);
+                std::println(verdict.serving ? stdout : stderr, "grpc-vlm-convert health: {} ({})",
+                             verdict.serving ? "SERVING" : "NOT_SERVING", verdict.detail);
+            });
+        endpoint_monitor.start();
+
         // The HTTP/JSON front end shares the service instance (and its
         // metrics) with gRPC; GRPC_VLM_HTTP_PORT 0/empty leaves it off. It
         // binds GRPC_VLM_HTTP_HOST, loopback unless the operator says
         // otherwise (and then a token is required).
         vlm::HttpGateway http_gateway(config, service);
+        http_gateway.set_health([&endpoint_monitor] { return endpoint_monitor.health(); });
         if (config.http_port != 0 &&
             !http_gateway.start(config.http_host, static_cast<int>(config.http_port))) {
             std::println(stderr, "Unable to listen on {}:{} (HTTP)", config.http_host,
@@ -111,6 +128,7 @@ int main() {
         server->Wait();
 
         http_gateway.stop();
+        endpoint_monitor.stop();
 
         // Wake the shutdown thread if Wait() returned for another reason.
         handle_shutdown(0);

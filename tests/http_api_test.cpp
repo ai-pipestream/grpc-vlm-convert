@@ -21,6 +21,7 @@
 #include <nlohmann/json.hpp>
 
 #include "config.h"
+#include "endpoint_health.h"
 #include "fixture.h"
 #include "http_gateway.h"
 #include "service/vlm_convert_service.h"
@@ -171,6 +172,28 @@ void verify_healthz(httplib::Client& client) {
     auto result = client.Get("/healthz");
     require(result && result->status == 200, "healthz is 200");
     require(result->body == "ok", "healthz body is ok");
+}
+
+// /healthz answers for the VLM endpoint, not for the listener: while the
+// endpoint is not serving, an orchestrator reading it must not route here.
+void verify_healthz_follows_the_endpoint(FakeVlm* fake) {
+    vlm::Config config;
+    config.endpoint = fake->endpoint();
+    HttpTestServer server(config);
+    std::atomic<bool> serving{false};
+    server.gateway.set_health([&] {
+        return serving.load()
+                   ? vlm::EndpointHealth{.serving = true, .detail = "ok"}
+                   : vlm::EndpointHealth{.serving = false, .detail = "endpoint unreachable"};
+    });
+    auto result = server.client.Get("/healthz");
+    require(result && result->status == 503, "healthz is 503 while the endpoint is down");
+    require(result->body.contains("endpoint unreachable"), "healthz says why: " + result->body);
+    serving = true;
+    result = server.client.Get("/healthz");
+    require(result && result->status == 200 && result->body == "ok",
+            "healthz is 200 ok once the endpoint serves");
+    server.stop();
 }
 
 void verify_sync_happy_path(httplib::Client& client) {
@@ -532,6 +555,7 @@ int main() {
         HttpTestServer server(std::move(config));
 
         verify_healthz(server.client);
+        verify_healthz_follows_the_endpoint(&fake);
         verify_sync_happy_path(server.client);
         verify_sync_garbage_json(server.client);
         verify_sync_non_png(server.client);

@@ -372,7 +372,12 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
         // token cost. Without the stop reason a page cut off at max_tokens
         // is indistinguishable from a page that simply ended there.
         page.has_generation = true;
-        page.generation.set_model(result.model.empty() ? job.model : result.model);
+        // `model` is the model that answered. An endpoint that does not
+        // say leaves it unset: the name asked for is already in the
+        // collector source, and repeating it here would record an answer
+        // under a model that may never have run (some servers answer with
+        // their one model whatever name the request carries).
+        page.generation.set_model(result.model);
         page.generation.set_endpoint(endpoint_origin(job.call.endpoint));
         if (!result.finish_reason.empty()) {
             page.generation.set_finish_reason(result.finish_reason);
@@ -407,7 +412,9 @@ grpc::Status VlmConvertServiceImpl::ConvertPagesCore(
             // item: nothing in the response maps a token back to the item
             // it ended up in.
             page.has_alternatives = true;
-            page.alternatives.set_created_by(page.generation.model());
+            if (!result.model.empty()) {
+                page.alternatives.set_created_by(result.model);
+            }
             for (const TokenAlternative& alternate : result.alternatives) {
                 auto* hypothesis = page.alternatives.add_hypotheses();
                 hypothesis->set_text(alternate.token);

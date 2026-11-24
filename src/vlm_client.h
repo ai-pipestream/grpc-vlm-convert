@@ -148,6 +148,18 @@ std::string endpoint_error(const std::string& endpoint);
 // not parse.
 bool same_endpoint(const std::string& left, const std::string& right);
 
+// Where an endpoint lists its models: the route beside its chat
+// completions one ("/v1/models" under the same path prefix, the query
+// kept, since deployments authenticate with it). The health probe asks
+// it. nullopt when the endpoint does not parse.
+struct ModelsRoute {
+    // "http://host[:port]".
+    std::string origin;
+    // Path plus query, e.g. "/base/v1/models?tenant=a".
+    std::string target;
+};
+std::optional<ModelsRoute> models_route(const std::string& endpoint);
+
 // The endpoint as it may be shown: scheme, host and port only. Userinfo,
 // path, query and fragment are dropped on purpose, because deployments put
 // tokens in all of them. Startup logs, GetServiceInfo, error text and the
